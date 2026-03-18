@@ -7,6 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use brutal_iroh::BrutalConfig;
 use bytes::Bytes;
 use iroh_quinn::{
     ClientConfig, MtuDiscoveryConfig, SendDatagramError, TransportConfig, VarInt,
@@ -331,6 +332,19 @@ pub fn gen_client_cfg(cfg: &SunnyQuicClientCfg) -> iroh_quinn::ClientConfig {
         CongestionControl::Bbr => {
             tp_cfg.congestion_controller_factory(Arc::new(BbrConfig::default()))
         }
+        CongestionControl::Brutal => {
+            let brutal = cfg.brutal.clone().unwrap_or_default();
+            tracing::info!(?brutal, "using brutal congestion control");
+            let brutal_config = BrutalConfig::new(
+                brutal.bandwidth,
+                brutal.min_window,
+                brutal.cwnd_gain,
+                brutal.min_ack_rate,
+                brutal.min_sample_count,
+                brutal.ack_compensate,
+            );
+            tp_cfg.congestion_controller_factory(Arc::new(brutal_config))
+        }
     };
     let mut config = ClientConfig::new(Arc::new(
         QuicClientConfig::try_from(crypto).expect("rustls config can't created"),
@@ -387,6 +401,20 @@ impl QuicServer for Endpoint<SunnyQuicServerCfg> {
             .enable_segmentation_offload(cfg.gso)
             .initial_mtu(cfg.initial_mtu);
         match cfg.congestion_control {
+            CongestionControl::Brutal => {
+                let brutal = cfg.brutal.clone().unwrap_or_default();
+
+                tracing::info!(?brutal, "using brutal congestion control");
+                let brutal_config = BrutalConfig::new(
+                    brutal.bandwidth,
+                    brutal.min_window,
+                    brutal.cwnd_gain,
+                    brutal.min_ack_rate,
+                    brutal.min_sample_count,
+                    brutal.ack_compensate,
+                );
+                tp_cfg.congestion_controller_factory(Arc::new(brutal_config))
+            }
             CongestionControl::Bbr => {
                 let bbr_config = BbrConfig::default();
                 tp_cfg.congestion_controller_factory(Arc::new(bbr_config))

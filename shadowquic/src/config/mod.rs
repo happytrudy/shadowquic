@@ -182,13 +182,38 @@ pub fn default_mtu_discovery() -> bool {
     true
 }
 
-#[derive(Serialize, Deserialize, Default, Debug, Clone)]
+pub fn default_brutal_bandwidth() -> u64 {
+    10_000_000
+}
+
+pub fn default_brutal_cwnd_gain() -> f64 {
+    1.10
+}
+
+pub fn default_brutal_min_window() -> u64 {
+    16 * 1024
+}
+
+pub fn default_brutal_min_ack_rate() -> f64 {
+    0.8
+}
+
+pub fn default_brutal_min_sample_count() -> u64 {
+    50
+}
+
+pub fn default_brutal_ack_compensate() -> bool {
+    false
+}
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum CongestionControl {
     #[default]
     Bbr,
     Cubic,
     NewReno,
+    Brutal,
 }
 /// Configuration of direct outbound
 /// Example:
