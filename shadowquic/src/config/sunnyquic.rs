@@ -3,9 +3,9 @@ use std::{net::SocketAddr, path::PathBuf};
 use serde::Deserialize;
 
 use crate::config::{
-    AuthUser, CongestionControl, default_alpn, default_congestion_control, default_gso,
-    default_initial_mtu, default_keep_alive_interval, default_min_mtu, default_mtu_discovery,
-    default_over_stream, default_zero_rtt,
+    AuthUser, BrutalParams, CongestionControl, default_alpn, default_congestion_control,
+    default_gso, default_initial_mtu, default_keep_alive_interval, default_min_mtu,
+    default_mtu_discovery, default_over_stream, default_zero_rtt,
 };
 
 pub(crate) fn default_multipath_num() -> u32 {
@@ -70,6 +70,10 @@ pub struct SunnyQuicServerCfg {
     /// For stable udp network, it's better to disable it and set a proper initial mtu
     #[serde(default = "default_mtu_discovery")]
     pub mtu_discovery: bool,
+
+    /// Brutal server configuration
+    #[serde(default)]
+    pub brutal: Option<BrutalParams>,
 }
 
 impl Default for SunnyQuicServerCfg {
@@ -88,6 +92,7 @@ impl Default for SunnyQuicServerCfg {
             server_name: "localhost".into(),
             mtu_discovery: default_mtu_discovery(),
             gso: default_gso(),
+            brutal: None,
         }
     }
 }
