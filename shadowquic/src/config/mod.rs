@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
-use tracing::Level;
+use tracing::{Level, warn};
 
 use crate::{
     Inbound, Manager, Outbound,
@@ -269,6 +269,52 @@ pub enum DnsStrategy {
     Ipv6Only,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CipherSuitePreference {
+    Aes128Gcm,
+    Chacha20Poly1305,
+    Aes256Gcm,
+}
+
+pub trait HasCipherSuitePreference {
+    fn has_cipher_suite_preference(&self) -> bool;
+}
+
+pub fn maybe_warn_cipher_suite_on_weak_arch<T: HasCipherSuitePreference>(_cfg: &T) {
+    #[cfg(any(target_arch = "mips", target_arch = "mips64"))]
+    {
+        if !_cfg.has_cipher_suite_preference() {
+            warn!(
+                "No `cipher-suite-preference` configured on MIPS target. \
+                 AES-128-GCM may be significantly slower than ChaCha20-Poly1305 on weak MIPS devices. \
+                 Consider setting `cipher-suite-preference: [\"chacha20-poly1305\", \"aes128-gcm\", \"aes256-gcm\"]`."
+            );
+        }
+    }
+}
+
+pub fn normalize_cipher_suite_preference(
+    cipher_suite_preference: &[CipherSuitePreference],
+) -> Vec<CipherSuitePreference> {
+    let mut out = Vec::new();
+
+    for suite in cipher_suite_preference {
+        if !out.contains(suite) {
+            out.push(suite.clone());
+        }
+    }
+
+    if !out.contains(&CipherSuitePreference::Aes128Gcm) {
+        warn!(
+            "`cipher-suite-preference` does not include `aes128-gcm`; appending it automatically"
+        );
+        out.push(CipherSuitePreference::Aes128Gcm);
+    }
+
+    out
+}
+
 /// Log level of shadowquic
 /// Default level is info.
 #[derive(Deserialize, Clone, Default, Debug)]
@@ -298,6 +344,7 @@ mod test {
     use crate::config::{CongestionControl, ShadowQuicClientCfg};
 
     use super::Config;
+    use super::{CipherSuitePreference, normalize_cipher_suite_preference};
     #[test]
     fn test() {
         let cfgstr = r###"
@@ -343,5 +390,42 @@ outbound:
             }
             _ => panic!("expected brutal congestion control"),
         }
+    }
+
+    #[test]
+    fn normalize_cipher_suite_preference_preserves_first_seen_order_and_removes_duplicates() {
+        let input = vec![
+            CipherSuitePreference::Chacha20Poly1305,
+            CipherSuitePreference::Aes256Gcm,
+            CipherSuitePreference::Chacha20Poly1305,
+            CipherSuitePreference::Aes128Gcm,
+            CipherSuitePreference::Aes256Gcm,
+        ];
+        let normalized = normalize_cipher_suite_preference(&input);
+        assert_eq!(
+            normalized,
+            vec![
+                CipherSuitePreference::Chacha20Poly1305,
+                CipherSuitePreference::Aes256Gcm,
+                CipherSuitePreference::Aes128Gcm,
+            ]
+        );
+    }
+    #[test]
+    fn normalize_cipher_suite_preference_appends_aes128_gcm_when_absent() {
+        let input = vec![
+            CipherSuitePreference::Aes256Gcm,
+            CipherSuitePreference::Chacha20Poly1305,
+            CipherSuitePreference::Aes256Gcm,
+        ];
+        let normalized = normalize_cipher_suite_preference(&input);
+        assert_eq!(
+            normalized,
+            vec![
+                CipherSuitePreference::Aes256Gcm,
+                CipherSuitePreference::Chacha20Poly1305,
+                CipherSuitePreference::Aes128Gcm,
+            ]
+        );
     }
 }
