@@ -1,3 +1,4 @@
+#![allow(clippy::while_let_loop, clippy::collapsible_if)]
 use rand::Rng;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -35,7 +36,7 @@ impl UdpHopClientProxy {
         min_hop_interval: u32,
         max_hop_interval: u32,
     ) -> Result<SocketAddr, std::io::Error> {
-        let mut host_addrs = tokio::net::lookup_host(format!("{}:0", addr.host))
+        let host_addrs = tokio::net::lookup_host(format!("{}:0", addr.host))
             .await?
             .collect::<Vec<_>>();
         if host_addrs.is_empty() {

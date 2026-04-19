@@ -49,7 +49,7 @@ impl SunnyQuicClient {
     }
 
     pub async fn get_conn(&self) -> Result<SunnyQuicConn, SError> {
-        let addr = self
+        let addr = *self
             .local_proxy_addr
             .get_or_init(|| async {
                 let hop_interval = self
@@ -100,8 +100,7 @@ impl SunnyQuicClient {
                         .unwrap_or_else(|| panic!("resolve quic addr faile: {}", self.config.addr))
                 }
             })
-            .await
-            .clone();
+            .await;
 
         let end = self
             .quic_end

@@ -45,7 +45,7 @@ impl ShadowQuicClient {
     }
 
     pub async fn get_conn(&self) -> Result<ShadowQuicConn, SError> {
-        let addr = self
+        let addr = *self
             .local_proxy_addr
             .get_or_init(|| async {
                 let hop_interval = self
@@ -96,8 +96,7 @@ impl ShadowQuicClient {
                         .unwrap_or_else(|| panic!("resolve quic addr faile: {}", self.config.addr))
                 }
             })
-            .await
-            .clone();
+            .await;
 
         let conn = self
             .quic_end
