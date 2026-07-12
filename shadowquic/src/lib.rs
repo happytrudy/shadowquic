@@ -1,4 +1,7 @@
-use std::sync::{Arc, Weak};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, Weak},
+};
 
 use bytes::Bytes;
 use error::SError;
@@ -35,6 +38,15 @@ pub enum ProxyRequest<T = AnyTcp, I = AnyUdpRecv, O = AnyUdpSend> {
     Tcp(TcpSession<T>),
     Udp(UdpSession<I, O>),
 }
+
+impl<T, I, O> ProxyRequest<T, I, O> {
+    pub fn remote_address(&self) -> Option<SocketAddr> {
+        match self {
+            Self::Tcp(session) => session.remote_address(),
+            Self::Udp(session) => session.remote_address(),
+        }
+    }
+}
 /// Udp socket only use immutable reference to self
 /// So it can be safely wrapped by Arc and cloned to work in duplex way.
 #[async_trait]
@@ -47,6 +59,10 @@ pub trait UdpRecv: Send + Sync + Unpin {
 }
 pub trait Stoppable: Send + Sync {
     fn stop(&self);
+
+    fn remote_address(&self) -> Option<SocketAddr> {
+        None
+    }
 }
 pub type UserName = String;
 pub struct TcpSession<IO = AnyTcp> {
@@ -70,6 +86,30 @@ pub struct UserContext {
     pub username: UserName,
     pub conn_handle: Weak<dyn Stoppable>,
     pub conn_id: u64,
+}
+
+impl UserContext {
+    pub fn remote_address(&self) -> Option<SocketAddr> {
+        self.conn_handle
+            .upgrade()
+            .and_then(|connection| connection.remote_address())
+    }
+}
+
+impl<IO> TcpSession<IO> {
+    pub fn remote_address(&self) -> Option<SocketAddr> {
+        self.user_context
+            .as_ref()
+            .and_then(UserContext::remote_address)
+    }
+}
+
+impl<I, O> UdpSession<I, O> {
+    pub fn remote_address(&self) -> Option<SocketAddr> {
+        self.user_context
+            .as_ref()
+            .and_then(UserContext::remote_address)
+    }
 }
 
 pub type AnyTcp = Box<dyn TcpTrait>;
@@ -133,5 +173,37 @@ impl Manager {
         }
         #[allow(unreachable_code)]
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{net::SocketAddr, sync::Arc};
+
+    use super::{Stoppable, UserContext};
+
+    struct TestConnection(SocketAddr);
+
+    impl Stoppable for TestConnection {
+        fn stop(&self) {}
+
+        fn remote_address(&self) -> Option<SocketAddr> {
+            Some(self.0)
+        }
+    }
+
+    #[test]
+    fn user_context_exposes_live_connection_remote_address() {
+        let expected = "203.0.113.8:443".parse().unwrap();
+        let connection: Arc<dyn Stoppable> = Arc::new(TestConnection(expected));
+        let context = UserContext {
+            username: "test".to_owned(),
+            conn_handle: Arc::downgrade(&connection),
+            conn_id: 1,
+        };
+
+        assert_eq!(context.remote_address(), Some(expected));
+        drop(connection);
+        assert_eq!(context.remote_address(), None);
     }
 }

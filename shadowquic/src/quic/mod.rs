@@ -67,6 +67,12 @@ impl<T: QuicConnection> Stoppable for T {
     fn stop(&self) {
         self.close(0, b"stopped by user");
     }
+
+    fn remote_address(&self) -> Option<SocketAddr> {
+        Some(crate::utils::dual_socket::to_ipv4_mapped(
+            QuicConnection::remote_address(self),
+        ))
+    }
 }
 
 pub trait AuthedConn {

@@ -245,6 +245,12 @@ impl<C: QuicConnection> Stoppable for SQServerConn<C> {
     fn stop(&self) {
         self.inner.conn.close(0, &[]);
     }
+
+    fn remote_address(&self) -> Option<std::net::SocketAddr> {
+        Some(crate::utils::dual_socket::to_ipv4_mapped(
+            self.inner.conn.remote_address(),
+        ))
+    }
 }
 #[derive(Debug)]
 pub struct Unsplit<S, R> {
