@@ -71,7 +71,7 @@ async fn sunnyquic_client_sqconn_records_authenticated_username() {
         alpn: vec!["h3".into()],
         zero_rtt: true,
         initial_mtu: default_initial_mtu(),
-        congestion_control: CongestionControl::Bbr,
+        congestion_control: CongestionControl::Bbr3,
         server_name: "localhost".into(),
         cert_path: "../assets/certs/localhost.crt".into(),
         key_path: "../assets/certs/localhost.key".into(),
@@ -89,7 +89,7 @@ async fn sunnyquic_client_sqconn_records_authenticated_username() {
         alpn: vec!["h3".into()],
         zero_rtt: true,
         initial_mtu: 1200,
-        congestion_control: CongestionControl::Bbr,
+        congestion_control: CongestionControl::Bbr3,
         cert_path: Some("../assets/certs/MyCA.pem".into()),
         ..Default::default()
     });

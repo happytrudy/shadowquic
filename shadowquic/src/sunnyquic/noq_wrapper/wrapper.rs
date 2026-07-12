@@ -14,6 +14,7 @@ use noq::{
     ClientConfig, MtuDiscoveryConfig, SendDatagramError, TransportConfig, VarInt,
     congestion::{Bbr3Config, CubicConfig, NewRenoConfig},
 };
+use quinn_congestions::bbr::noq::BbrConfig;
 #[cfg(feature = "aws-lc-rs")]
 use rustls::crypto::aws_lc_rs as crypto_provider;
 #[cfg(all(feature = "ring", not(feature = "aws-lc-rs")))]
@@ -347,21 +348,27 @@ pub fn gen_client_cfg(cfg: &SunnyQuicClientCfg) -> noq::ClientConfig {
     });
     tp_cfg.max_concurrent_multipath_paths(cfg.max_path_num);
 
-    match cfg.congestion_control {
-        CongestionControl::Cubic => {
-            tp_cfg.congestion_controller_factory(Arc::new(CubicConfig::default()))
-        }
-        CongestionControl::NewReno => {
-            tp_cfg.congestion_controller_factory(Arc::new(NewRenoConfig::default()))
-        }
+    configure_congestion_control(&mut tp_cfg, &cfg.congestion_control);
+    let mut config = ClientConfig::new(Arc::new(
+        QuicClientConfig::try_from(crypto).expect("rustls config can't created"),
+    ));
+
+    config.transport_config(Arc::new(tp_cfg));
+    config
+}
+
+fn configure_congestion_control(
+    transport: &mut TransportConfig,
+    congestion_control: &CongestionControl,
+) {
+    match congestion_control {
         CongestionControl::Bbr => {
-            warn!("BBR is not implemented, fallback to BBR3");
-            tp_cfg.congestion_controller_factory(Arc::new(Bbr3Config::default()))
+            transport.congestion_controller_factory(Arc::new(BbrConfig::default()))
         }
         CongestionControl::Bbr3 => {
-            tp_cfg.congestion_controller_factory(Arc::new(Bbr3Config::default()))
+            transport.congestion_controller_factory(Arc::new(Bbr3Config::default()))
         }
-        CongestionControl::Brutal(ref brutal) => {
+        CongestionControl::Brutal(brutal) => {
             tracing::info!(?brutal, "using brutal congestion control");
             let brutal_config = BrutalConfig::new(
                 brutal.bandwidth,
@@ -371,15 +378,15 @@ pub fn gen_client_cfg(cfg: &SunnyQuicClientCfg) -> noq::ClientConfig {
                 brutal.min_sample_count,
                 brutal.ack_compensate,
             );
-            tp_cfg.congestion_controller_factory(Arc::new(brutal_config))
+            transport.congestion_controller_factory(Arc::new(brutal_config))
+        }
+        CongestionControl::Cubic => {
+            transport.congestion_controller_factory(Arc::new(CubicConfig::default()))
+        }
+        CongestionControl::NewReno => {
+            transport.congestion_controller_factory(Arc::new(NewRenoConfig::default()))
         }
     };
-    let mut config = ClientConfig::new(Arc::new(
-        QuicClientConfig::try_from(crypto).expect("rustls config can't created"),
-    ));
-
-    config.transport_config(Arc::new(tp_cfg));
-    config
 }
 
 #[async_trait]
@@ -483,35 +490,7 @@ fn gen_server_config(
         .min_mtu(cfg.min_mtu)
         .enable_segmentation_offload(cfg.gso)
         .initial_mtu(cfg.initial_mtu);
-    match cfg.congestion_control {
-        CongestionControl::Brutal(ref brutal) => {
-            tracing::info!(?brutal, "using brutal congestion control");
-            let brutal_config = BrutalConfig::new(
-                brutal.bandwidth,
-                brutal.min_window,
-                brutal.cwnd_gain,
-                brutal.min_ack_rate,
-                brutal.min_sample_count,
-                brutal.ack_compensate,
-            );
-            tp_cfg.congestion_controller_factory(Arc::new(brutal_config))
-        }
-        CongestionControl::Bbr => {
-            warn!("BBR is not implemented, fallback to BBR3");
-            tp_cfg.congestion_controller_factory(Arc::new(Bbr3Config::default()))
-        }
-        CongestionControl::Bbr3 => {
-            tp_cfg.congestion_controller_factory(Arc::new(Bbr3Config::default()))
-        }
-        CongestionControl::Cubic => {
-            let cubic_config = CubicConfig::default();
-            tp_cfg.congestion_controller_factory(Arc::new(cubic_config))
-        }
-        CongestionControl::NewReno => {
-            let new_reno = NewRenoConfig::default();
-            tp_cfg.congestion_controller_factory(Arc::new(new_reno))
-        }
-    };
+    configure_congestion_control(&mut tp_cfg, &cfg.congestion_control);
     let mut config = noq::ServerConfig::with_crypto(Arc::new(
         QuicServerConfig::try_from(crypto.clone()).expect("rustls config can't created"),
     ));

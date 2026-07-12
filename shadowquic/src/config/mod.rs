@@ -339,6 +339,7 @@ impl PartialEq for CongestionControl {
                 | (CongestionControl::Cubic, CongestionControl::Cubic)
                 | (CongestionControl::NewReno, CongestionControl::NewReno)
                 | (CongestionControl::Brutal(_), CongestionControl::Brutal(_))
+                | (CongestionControl::Bbr3, CongestionControl::Bbr3)
         )
     }
 }
@@ -496,6 +497,13 @@ outbound:
             }
             _ => panic!("expected brutal congestion control"),
         }
+    }
+
+    #[test]
+    fn congestion_control_variants_compare_by_algorithm() {
+        assert_eq!(CongestionControl::Bbr, CongestionControl::Bbr);
+        assert_eq!(CongestionControl::Bbr3, CongestionControl::Bbr3);
+        assert_ne!(CongestionControl::Bbr, CongestionControl::Bbr3);
     }
 
     #[test]
