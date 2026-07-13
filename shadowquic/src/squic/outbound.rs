@@ -72,13 +72,11 @@ pub async fn handle_request<C: QuicConnection>(
                 let fut1 = handle_udp_send(send, udp_session.recv, conn, over_stream);
 
                 let fut3 = async {
-                    if udp_session.stream.is_none() {
+                    let Some(mut stream) = udp_session.stream else {
                         return Ok(());
-                    }
+                    };
                     let mut buf = [0u8];
-                    udp_session
-                        .stream
-                        .unwrap()
+                    stream
                         .read_exact(&mut buf)
                         .await
                         .map_err(|x| SError::UDPSessionClosed(x.to_string()))?;

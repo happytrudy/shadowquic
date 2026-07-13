@@ -46,6 +46,13 @@ impl<T, I, O> ProxyRequest<T, I, O> {
             Self::Udp(session) => session.remote_address(),
         }
     }
+
+    pub fn username(&self) -> Option<&str> {
+        match self {
+            Self::Tcp(session) => session.username(),
+            Self::Udp(session) => session.username(),
+        }
+    }
 }
 /// Udp socket only use immutable reference to self
 /// So it can be safely wrapped by Arc and cloned to work in duplex way.
@@ -94,6 +101,10 @@ impl UserContext {
             .upgrade()
             .and_then(|connection| connection.remote_address())
     }
+
+    pub fn username(&self) -> &str {
+        &self.username
+    }
 }
 
 impl<IO> TcpSession<IO> {
@@ -102,6 +113,10 @@ impl<IO> TcpSession<IO> {
             .as_ref()
             .and_then(UserContext::remote_address)
     }
+
+    pub fn username(&self) -> Option<&str> {
+        self.user_context.as_ref().map(UserContext::username)
+    }
 }
 
 impl<I, O> UdpSession<I, O> {
@@ -109,6 +124,10 @@ impl<I, O> UdpSession<I, O> {
         self.user_context
             .as_ref()
             .and_then(UserContext::remote_address)
+    }
+
+    pub fn username(&self) -> Option<&str> {
+        self.user_context.as_ref().map(UserContext::username)
     }
 }
 
@@ -203,6 +222,7 @@ mod tests {
         };
 
         assert_eq!(context.remote_address(), Some(expected));
+        assert_eq!(context.username(), "test");
         drop(connection);
         assert_eq!(context.remote_address(), None);
     }

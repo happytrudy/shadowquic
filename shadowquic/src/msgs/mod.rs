@@ -4,6 +4,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::error::SError;
 
+pub const MAX_SEQUENCE_ITEMS: usize = 64 * 1024;
+pub const MAX_STRING_BYTES: usize = 64 * 1024;
+
 #[cfg(test)]
 mod socks5_addr_test;
 
@@ -115,7 +118,10 @@ impl SDecode for () {
 #[async_trait::async_trait]
 impl<E: SEncode + Send + Sync> SEncode for Vec<E> {
     async fn encode<T: AsyncWrite + Unpin + Send>(&self, s: &mut T) -> Result<(), SError> {
-        let len = self.len() as u32;
+        if self.len() > MAX_SEQUENCE_ITEMS {
+            return Err(SError::ProtocolViolation);
+        }
+        let len = u32::try_from(self.len()).map_err(|_| SError::ProtocolViolation)?;
         len.encode(s).await?;
         for item in self {
             item.encode(s).await?;
@@ -126,8 +132,11 @@ impl<E: SEncode + Send + Sync> SEncode for Vec<E> {
 #[async_trait::async_trait]
 impl<E: SDecode + Send + Sync> SDecode for Vec<E> {
     async fn decode<T: AsyncRead + Unpin + Send>(s: &mut T) -> Result<Self, SError> {
-        let len = u32::decode(s).await?;
-        let mut data = Vec::with_capacity(len as usize);
+        let len = usize::try_from(u32::decode(s).await?).map_err(|_| SError::ProtocolViolation)?;
+        if len > MAX_SEQUENCE_ITEMS {
+            return Err(SError::ProtocolViolation);
+        }
+        let mut data = Vec::with_capacity(len);
         for _ in 0..len {
             data.push(E::decode(s).await?);
         }
@@ -137,13 +146,73 @@ impl<E: SDecode + Send + Sync> SDecode for Vec<E> {
 #[async_trait::async_trait]
 impl SEncode for String {
     async fn encode<T: AsyncWrite + Unpin + Send>(&self, s: &mut T) -> Result<(), SError> {
-        self.as_bytes().to_vec().encode(s).await
+        let bytes = self.as_bytes();
+        if bytes.len() > MAX_STRING_BYTES {
+            return Err(SError::ProtocolViolation);
+        }
+        let len = u32::try_from(bytes.len()).map_err(|_| SError::ProtocolViolation)?;
+        len.encode(s).await?;
+        s.write_all(bytes).await?;
+        Ok(())
     }
 }
 #[async_trait::async_trait]
 impl SDecode for String {
     async fn decode<T: AsyncRead + Unpin + Send>(s: &mut T) -> Result<Self, SError> {
-        let data = Vec::<u8>::decode(s).await?;
+        let len = usize::try_from(u32::decode(s).await?).map_err(|_| SError::ProtocolViolation)?;
+        if len > MAX_STRING_BYTES {
+            return Err(SError::ProtocolViolation);
+        }
+        let mut data = vec![0; len];
+        s.read_exact(&mut data).await?;
         Ok(String::from_utf8(data).map_err(|_| SError::ProtocolViolation)?)
+    }
+}
+
+#[cfg(test)]
+mod length_limit_tests {
+    use std::io::Cursor;
+
+    use super::{MAX_SEQUENCE_ITEMS, MAX_STRING_BYTES, SDecode, SEncode};
+    use crate::error::SError;
+
+    #[tokio::test]
+    async fn rejects_oversized_sequence_before_allocation() {
+        let mut encoded = Cursor::new(
+            u32::try_from(MAX_SEQUENCE_ITEMS + 1)
+                .unwrap()
+                .to_be_bytes()
+                .to_vec(),
+        );
+        assert!(matches!(
+            Vec::<u8>::decode(&mut encoded).await,
+            Err(SError::ProtocolViolation)
+        ));
+
+        let mut sink = Vec::new();
+        assert!(matches!(
+            vec![0u8; MAX_SEQUENCE_ITEMS + 1].encode(&mut sink).await,
+            Err(SError::ProtocolViolation)
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_string_before_allocation() {
+        let mut encoded = Cursor::new(
+            u32::try_from(MAX_STRING_BYTES + 1)
+                .unwrap()
+                .to_be_bytes()
+                .to_vec(),
+        );
+        assert!(matches!(
+            String::decode(&mut encoded).await,
+            Err(SError::ProtocolViolation)
+        ));
+
+        let mut sink = Vec::new();
+        assert!(matches!(
+            "x".repeat(MAX_STRING_BYTES + 1).encode(&mut sink).await,
+            Err(SError::ProtocolViolation)
+        ));
     }
 }

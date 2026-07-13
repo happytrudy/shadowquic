@@ -82,6 +82,8 @@ pub trait AuthedConn {
 #[derive(Error, Debug)]
 #[error(transparent)]
 pub enum QuicErrorRepr {
+    #[error("QUIC endpoint closed")]
+    EndpointClosed,
     // gm-quic errors
     #[error("QUIC IO Error:{0}")]
     QuicIoError(String),

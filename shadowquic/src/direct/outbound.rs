@@ -151,7 +151,10 @@ impl DirectOut {
         // If it fails, we fallback to single stack socket
         // https://github.com/spongebob888/shadowquic/issues/172
         let socket = if dst.ip().is_unspecified() {
-            let socket = DualSocket::new_bind("[::]:0".parse().unwrap(), true)?;
+            let socket = DualSocket::new_bind(
+                std::net::SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), 0),
+                true,
+            )?;
             if socket.dual_stack || !ipv4 {
                 trace!("bound to dual stack socket");
                 socket

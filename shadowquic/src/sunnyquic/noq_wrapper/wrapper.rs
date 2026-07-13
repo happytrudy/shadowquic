@@ -11,7 +11,7 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use bytes::Bytes;
 use noq::{
-    ClientConfig, MtuDiscoveryConfig, SendDatagramError, TransportConfig, VarInt,
+    ClientConfig, MtuDiscoveryConfig, TransportConfig, VarInt,
     congestion::{Bbr3Config, CubicConfig, NewRenoConfig},
 };
 use quinn_congestions::bbr::noq::BbrConfig;
@@ -119,16 +119,7 @@ impl QuicConnection for Connection {
     }
 
     async fn send_datagram(&self, bytes: Bytes) -> Result<(), QuicErrorRepr> {
-        let len = bytes.len();
-        match self.send_datagram(bytes) {
-            Ok(_) => (),
-            Err(SendDatagramError::TooLarge) => warn!(
-                "datagram too large:{}>{}",
-                len,
-                self.max_datagram_size().unwrap()
-            ),
-            e => e?,
-        }
+        self.send_datagram(bytes)?;
         Ok(())
     }
 
@@ -146,7 +137,7 @@ impl QuicConnection for Connection {
         self.stable_id() as u64
     }
     fn close(&self, error_code: u64, reason: &[u8]) {
-        self.close(VarInt::from_u64(error_code).unwrap(), reason);
+        self.close(VarInt::from_u64(error_code).unwrap_or(VarInt::MAX), reason);
     }
 }
 
@@ -214,7 +205,7 @@ impl QuicClient for EndClient {
             UdpSocket::from(socket),
             runtime,
         )?;
-        end.set_default_client_config(gen_client_cfg(cfg));
+        end.set_default_client_config(gen_client_cfg(cfg)?);
         Ok(EndClient {
             inner: end,
             cfg: Arc::new(cfg.to_owned()),
@@ -284,20 +275,30 @@ fn to_rustls_cipher_suite(suite: &CipherSuitePreference) -> rustls::SupportedCip
     }
 }
 
-pub fn gen_client_cfg(cfg: &SunnyQuicClientCfg) -> noq::ClientConfig {
+pub fn gen_client_cfg(cfg: &SunnyQuicClientCfg) -> SResult<noq::ClientConfig> {
     maybe_warn_cipher_suite_on_weak_arch(cfg);
 
     let mut root_store = RootCertStore::empty();
-    for cert in
-        rustls_native_certs::load_native_certs().expect("failed to load OS root certificates")
+    let native_certs = rustls_native_certs::load_native_certs();
+    if native_certs.certs.is_empty()
+        && let Some(error) = native_certs.errors.first()
     {
-        root_store.add(cert).unwrap();
+        return Err(SError::RustlsError(error.to_string()));
+    }
+    for error in &native_certs.errors {
+        warn!(%error, "failed to load one OS root certificate");
+    }
+    for cert in native_certs.certs {
+        root_store
+            .add(cert)
+            .map_err(|x| SError::RustlsError(x.to_string()))?;
     }
 
     if let Some(path) = &cfg.cert_path {
         let der_cert = CertificateDer::pem_file_iter(path)
-            .unwrap_or_else(|_| panic!("certificate not found:{:?}", path))
-            .filter_map(|x| x.ok());
+            .map_err(|x| SError::RustlsError(x.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|x| SError::RustlsError(x.to_string()))?;
         root_store.add_parsable_certificates(der_cert);
     }
 
@@ -308,7 +309,7 @@ pub fn gen_client_cfg(cfg: &SunnyQuicClientCfg) -> noq::ClientConfig {
 
         rustls::ClientConfig::builder_with_provider(Arc::new(provider))
             .with_protocol_versions(&[&rustls::version::TLS13])
-            .unwrap()
+            .map_err(|x| SError::RustlsError(x.to_string()))?
     } else {
         rustls::ClientConfig::builder()
     };
@@ -350,11 +351,11 @@ pub fn gen_client_cfg(cfg: &SunnyQuicClientCfg) -> noq::ClientConfig {
 
     configure_congestion_control(&mut tp_cfg, &cfg.congestion_control);
     let mut config = ClientConfig::new(Arc::new(
-        QuicClientConfig::try_from(crypto).expect("rustls config can't created"),
+        QuicClientConfig::try_from(crypto).map_err(|x| SError::RustlsError(x.to_string()))?,
     ));
 
     config.transport_config(Arc::new(tp_cfg));
-    config
+    Ok(config)
 }
 
 fn configure_congestion_control(
@@ -395,7 +396,7 @@ impl QuicServer for EndServer {
     type SC = SunnyQuicServerCfg;
     async fn new(cfg: &Self::SC) -> SResult<Self> {
         let mut crypto = gen_server_crypto(cfg)?;
-        let config = gen_server_config(cfg, &mut crypto);
+        let config = gen_server_config(cfg, &mut crypto)?;
 
         let endpoint = noq::Endpoint::server(config, cfg.bind_addr)?;
         Ok(EndServer {
@@ -407,7 +408,7 @@ impl QuicServer for EndServer {
 
     async fn update_config(&self, cfg: &Self::SC) -> SResult<()> {
         let mut crypto: RustlsServerConfig = (**self.crypto.load()).clone();
-        let config = gen_server_config(cfg, &mut crypto);
+        let config = gen_server_config(cfg, &mut crypto)?;
         self.inner.set_server_config(Some(config));
         self.crypto.store(crypto.into());
         self.cfg.store(Arc::new(cfg.to_owned()));
@@ -435,9 +436,7 @@ impl QuicServer for EndServer {
                 };
                 Ok(connection)
             }
-            None => {
-                panic!("Quic endpoint closed");
-            }
+            None => Err(QuicErrorRepr::EndpointClosed),
         }
     }
 }
@@ -460,7 +459,7 @@ fn gen_server_crypto(cfg: &SunnyQuicServerCfg) -> SResult<RustlsServerConfig> {
 fn gen_server_config(
     cfg: &SunnyQuicServerCfg,
     crypto: &mut RustlsServerConfig,
-) -> noq::ServerConfig {
+) -> SResult<noq::ServerConfig> {
     crypto.alpn_protocols = cfg
         .alpn
         .iter()
@@ -492,7 +491,8 @@ fn gen_server_config(
         .initial_mtu(cfg.initial_mtu);
     configure_congestion_control(&mut tp_cfg, &cfg.congestion_control);
     let mut config = noq::ServerConfig::with_crypto(Arc::new(
-        QuicServerConfig::try_from(crypto.clone()).expect("rustls config can't created"),
+        QuicServerConfig::try_from(crypto.clone())
+            .map_err(|x| SError::RustlsError(x.to_string()))?,
     ));
     tp_cfg.send_window(MAX_SEND_WINDOW);
     tp_cfg.stream_receive_window(MAX_STREAM_WINDOW.try_into().unwrap());
@@ -501,7 +501,7 @@ fn gen_server_config(
     tp_cfg.max_concurrent_multipath_paths(cfg.max_path_num);
 
     config.transport_config(Arc::new(tp_cfg));
-    config
+    Ok(config)
 }
 
 impl From<noq::ConnectionError> for QuicErrorRepr {

@@ -17,7 +17,7 @@ use quinn::rustls::{
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
 };
 use quinn::{
-    ClientConfig, MtuDiscoveryConfig, SendDatagramError, TransportConfig, VarInt,
+    ClientConfig, MtuDiscoveryConfig, TransportConfig, VarInt,
     congestion::{BbrConfig, CubicConfig, NewRenoConfig},
 };
 use socket2::{Domain, Protocol, Socket, Type};
@@ -38,7 +38,7 @@ use crate::{
         CipherSuitePreference, CongestionControl, ShadowQuicClientCfg, ShadowQuicServerCfg,
         maybe_warn_cipher_suite_on_weak_arch, normalize_cipher_suite_preference,
     },
-    error::SResult,
+    error::{SError, SResult},
     msgs::squic::ConnStats,
     quic::{
         AuthedConn, MAX_DATAGRAM_WINDOW, MAX_SEND_WINDOW, MAX_STREAM_WINDOW, QuicClient,
@@ -115,16 +115,7 @@ impl QuicConnection for Connection {
     }
 
     async fn send_datagram(&self, bytes: Bytes) -> Result<(), QuicErrorRepr> {
-        let len = bytes.len();
-        match self.send_datagram(bytes) {
-            Ok(_) => (),
-            Err(SendDatagramError::TooLarge) => warn!(
-                "datagram too large:{}>{}",
-                len,
-                self.max_datagram_size().unwrap()
-            ),
-            e => e?,
-        }
+        self.send_datagram(bytes)?;
         Ok(())
     }
 
@@ -138,7 +129,7 @@ impl QuicConnection for Connection {
         self.stable_id() as u64
     }
     fn close(&self, error_code: u64, reason: &[u8]) {
-        self.close(VarInt::from_u64(error_code).unwrap(), reason);
+        self.close(VarInt::from_u64(error_code).unwrap_or(VarInt::MAX), reason);
     }
     fn get_conn_stats(&self) -> Option<ConnStats> {
         let stats = self.stats();
@@ -220,7 +211,7 @@ impl QuicClient for EndClient {
             std::net::UdpSocket::from(socket_factory.create_socket().await?),
             runtime,
         )?;
-        end.set_default_client_config(gen_client_cfg(cfg));
+        end.set_default_client_config(gen_client_cfg(cfg)?);
         Ok(EndClient {
             inner: end,
             zero_rtt: cfg.zero_rtt,
@@ -240,7 +231,7 @@ fn to_quinn_cipher_suite(suite: &CipherSuitePreference) -> quinn::rustls::Suppor
     }
 }
 
-pub fn gen_client_cfg(cfg: &ShadowQuicClientCfg) -> quinn::ClientConfig {
+pub fn gen_client_cfg(cfg: &ShadowQuicClientCfg) -> SResult<quinn::ClientConfig> {
     maybe_warn_cipher_suite_on_weak_arch(cfg);
 
     let root_store = RootCertStore {
@@ -255,7 +246,7 @@ pub fn gen_client_cfg(cfg: &ShadowQuicClientCfg) -> quinn::ClientConfig {
 
         quinn::rustls::ClientConfig::builder_with_provider(Arc::new(provider))
             .with_protocol_versions(&[&quinn::rustls::version::TLS13])
-            .unwrap()
+            .map_err(|x| SError::RustlsError(x.to_string()))?
     } else {
         quinn::rustls::ClientConfig::builder()
     };
@@ -328,11 +319,11 @@ pub fn gen_client_cfg(cfg: &ShadowQuicClientCfg) -> quinn::ClientConfig {
         }
     };
     let mut config = ClientConfig::new(Arc::new(
-        QuicClientConfig::try_from(crypto).expect("rustls config can't created"),
+        QuicClientConfig::try_from(crypto).map_err(|x| SError::RustlsError(x.to_string()))?,
     ));
 
     config.transport_config(Arc::new(tp_cfg));
-    config
+    Ok(config)
 }
 
 fn bind_server_udp_socket(bind_addr: SocketAddr) -> io::Result<UdpSocket> {
@@ -354,23 +345,25 @@ impl QuicServer for EndServer {
     type SC = ShadowQuicServerCfg;
     async fn new(cfg: &Self::SC) -> SResult<Self> {
         let mut crypto: RustlsServerConfig;
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
+            .map_err(|x| SError::RustlsError(x.to_string()))?;
         let cert_der = CertificateDer::from(cert.cert);
         let priv_key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
         crypto =
             RustlsServerConfig::builder_with_protocol_versions(&[&quinn::rustls::version::TLS13])
                 .with_no_client_auth()
                 .with_single_cert(vec![cert_der], PrivateKeyDer::Pkcs8(priv_key))
-                .expect("invalid cert or key when create shadowquic server");
+                .map_err(|x| SError::RustlsError(x.to_string()))?;
 
-        let config = gen_server_config(cfg, &mut crypto);
+        let config = gen_server_config(cfg, &mut crypto)?;
         let socket = bind_server_udp_socket(cfg.bind_addr)?;
         socket.set_nonblocking(true)?;
         let endpoint = quinn::Endpoint::new(
             quinn::EndpointConfig::default(),
             Some(config.clone()),
             socket,
-            quinn::default_runtime().expect("no runtime found for quinn"),
+            quinn::default_runtime()
+                .ok_or_else(|| io::Error::other("no runtime found for quinn"))?,
         )?;
         Ok(EndServer {
             crypto: Arc::new(ArcSwap::new(crypto.into())),
@@ -380,7 +373,7 @@ impl QuicServer for EndServer {
     }
     async fn update_config(&self, cfg: &Self::SC) -> SResult<()> {
         let mut crypto: RustlsServerConfig = (**self.crypto.load()).clone();
-        let config = gen_server_config(cfg, &mut crypto);
+        let config = gen_server_config(cfg, &mut crypto)?;
         self.inner.set_server_config(Some(config));
         self.zero_rtt.store(cfg.zero_rtt, Relaxed);
         self.crypto.store(crypto.into());
@@ -415,9 +408,7 @@ impl QuicServer for EndServer {
                 }
                 Ok(connection)
             }
-            None => {
-                panic!("Quic endpoint closed");
-            }
+            None => Err(QuicErrorRepr::EndpointClosed),
         }
     }
 }
@@ -425,7 +416,7 @@ impl QuicServer for EndServer {
 fn gen_server_config(
     cfg: &ShadowQuicServerCfg,
     crypto: &mut RustlsServerConfig,
-) -> quinn::ServerConfig {
+) -> SResult<quinn::ServerConfig> {
     crypto.alpn_protocols = cfg
         .alpn
         .iter()
@@ -502,7 +493,8 @@ fn gen_server_config(
         }
     };
     let mut config = quinn::ServerConfig::with_crypto(Arc::new(
-        QuicServerConfig::try_from(crypto.clone()).expect("rustls config can't created"),
+        QuicServerConfig::try_from(crypto.clone())
+            .map_err(|x| SError::RustlsError(x.to_string()))?,
     ));
     tp_cfg.send_window(MAX_SEND_WINDOW);
     tp_cfg.stream_receive_window(MAX_STREAM_WINDOW.try_into().unwrap());
@@ -510,7 +502,7 @@ fn gen_server_config(
     tp_cfg.datagram_receive_buffer_size(Some(MAX_DATAGRAM_WINDOW as usize));
 
     config.transport_config(Arc::new(tp_cfg));
-    config
+    Ok(config)
 }
 
 impl From<quinn::ConnectionError> for QuicErrorRepr {

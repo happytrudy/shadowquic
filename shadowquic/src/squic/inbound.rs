@@ -1,10 +1,14 @@
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     select,
-    sync::mpsc::{Sender, channel},
+    sync::{
+        Mutex, SetOnce,
+        mpsc::{Sender, channel},
+    },
 };
 use tracing::{Instrument, info, info_span, trace};
 
@@ -26,7 +30,43 @@ use crate::{
 
 use super::{SQConn, handle_udp_packet_recv, handle_udp_recv_ctrl, handle_udp_send};
 
-pub type SunnyQuicUsers = Arc<HashMap<SunnyCredential, String>>;
+pub type SunnyQuicUserMap = HashMap<SunnyCredential, String>;
+pub type SunnyQuicUsers = Arc<ArcSwap<SunnyQuicUserMap>>;
+
+#[derive(Default)]
+pub(crate) struct ConnectionRegistry {
+    connections: Mutex<HashMap<u64, UserContext>>,
+}
+
+impl ConnectionRegistry {
+    pub(crate) async fn register(&self, context: UserContext) {
+        let mut connections = self.connections.lock().await;
+        connections.retain(|_, existing| existing.conn_handle.upgrade().is_some());
+        connections.insert(context.conn_id, context);
+    }
+
+    pub(crate) async fn close_user(&self, username: &str) {
+        let to_close = {
+            let mut connections = self.connections.lock().await;
+            let mut to_close = Vec::new();
+            connections.retain(|_, context| {
+                let live = context.conn_handle.upgrade().is_some();
+                if live && context.username == username {
+                    to_close.push(context.conn_handle.clone());
+                    false
+                } else {
+                    live
+                }
+            });
+            to_close
+        };
+        for connection in to_close {
+            if let Some(connection) = connection.upgrade() {
+                connection.stop();
+            }
+        }
+    }
+}
 
 #[async_trait::async_trait]
 pub trait UserManager: Send + Sync {
@@ -41,10 +81,36 @@ pub trait UserManager: Send + Sync {
 #[derive(Clone)]
 pub struct SQServerConn<C: QuicConnection> {
     pub inner: SQConn<C>,
-    pub users: SunnyQuicUsers,
+    pub users: Option<SunnyQuicUsers>,
+    pub sunny_credential: Option<Arc<SetOnce<SunnyCredential>>>,
     pub user_manager: Option<Arc<dyn UserManager>>,
+    pub(crate) connections: Arc<ConnectionRegistry>,
 }
 impl<C: QuicConnection> SQServerConn<C> {
+    fn user_context(self: &Arc<Self>, username: String) -> UserContext {
+        UserContext {
+            username,
+            conn_handle: Arc::downgrade(&(self.clone() as Arc<dyn Stoppable>)),
+            conn_id: self.inner.conn.peer_id(),
+        }
+    }
+
+    async fn current_user(self: &Arc<Self>) -> SResult<String> {
+        let username = wait_sunny_auth(&self.inner).await?;
+        if let Some(users) = &self.users {
+            let credential = self
+                .sunny_credential
+                .as_ref()
+                .and_then(|credential| credential.get())
+                .ok_or(SError::ProtocolViolation)?;
+            if users.load().get(credential.as_ref()) != Some(&username) {
+                self.inner.close(0, b"user revoked");
+                return Err(SError::SunnyAuthError("User revoked".into()));
+            }
+        }
+        Ok(username)
+    }
+
     pub async fn handle_connection(
         self: Arc<Self>,
         req_send: Sender<ProxyRequest>,
@@ -86,16 +152,12 @@ impl<C: QuicConnection> SQServerConn<C> {
         // );
         match req {
             SQReq::SQConnect(dst) => {
-                let user = wait_sunny_auth(&self.inner).await?;
+                let user = self.current_user().await?;
                 info!(dst = %dst, "tcp connect request accepted");
                 let tcp: TcpSession = TcpSession {
                     stream: Box::new(Unsplit { s: send, r: recv }),
                     dst,
-                    user_context: Some(UserContext {
-                        username: user,
-                        conn_handle: Arc::downgrade(&(self.clone() as Arc<dyn Stoppable>)),
-                        conn_id: self.inner.conn.peer_id(),
-                    }),
+                    user_context: Some(self.user_context(user)),
                 };
                 req_send
                     .send(ProxyRequest::Tcp(tcp))
@@ -104,7 +166,7 @@ impl<C: QuicConnection> SQServerConn<C> {
             }
             ref req @ (SQReq::SQAssociatOverDatagram(ref dst)
             | SQReq::SQAssociatOverStream(ref dst)) => {
-                let user = wait_sunny_auth(&self.inner).await?;
+                let user = self.current_user().await?;
                 info!(bind_addr = %dst, "udp associate request accepted");
                 let (local_send, udp_recv) = channel::<(Bytes, SocksAddr)>(10);
                 let (udp_send, local_recv) = channel::<(Bytes, SocksAddr)>(10);
@@ -113,11 +175,7 @@ impl<C: QuicConnection> SQServerConn<C> {
                     recv: Box::new(udp_recv),
                     stream: None,
                     bind_addr: dst.clone(),
-                    user_context: Some(UserContext {
-                        username: user,
-                        conn_handle: Arc::downgrade(&(self.clone() as Arc<dyn Stoppable>)),
-                        conn_id: self.inner.conn.peer_id(),
-                    }),
+                    user_context: Some(self.user_context(user)),
                 };
                 let local_send = Arc::new(local_send);
                 req_send
@@ -134,12 +192,26 @@ impl<C: QuicConnection> SQServerConn<C> {
                 tokio::try_join!(fut1, fut2)?;
             }
             SQReq::SQAuthenticate(passwd_hash) => {
-                if let Some(name) = self.users.get(passwd_hash.as_ref()) {
+                if self.inner.authed.get().is_some() {
+                    self.inner.close(0, b"repeated authentication");
+                    return Err(SError::ProtocolViolation);
+                }
+                let Some(users) = &self.users else {
+                    return Err(SError::ProtocolViolation);
+                };
+                let name = users.load().get(passwd_hash.as_ref()).cloned();
+                if let Some(name) = name {
                     tracing::info!("user authenticated:{}", name);
+                    self.sunny_credential
+                        .as_ref()
+                        .ok_or(SError::ProtocolViolation)?
+                        .set(passwd_hash)
+                        .map_err(|_| SError::ProtocolViolation)?;
                     self.inner
                         .authed
                         .set(Ok(name.clone()))
-                        .expect("repeated authentication!");
+                        .map_err(|_| SError::ProtocolViolation)?;
+                    self.connections.register(self.user_context(name)).await;
                 } else {
                     tracing::error!("authentication failed");
                     // 263 is tested result by connecting with sunnyquic client to
@@ -149,21 +221,19 @@ impl<C: QuicConnection> SQServerConn<C> {
                 }
             }
             SQReq::SQExtension(ext_opcode) => {
-                wait_sunny_auth(&self.inner).await?;
                 self.handle_extension(ext_opcode, send, recv).await?;
             }
-            _ => {
-                unimplemented!()
-            }
+            SQReq::SQBind(_) => return Err(SError::ProtocolUnimpl),
         }
         Ok(())
     }
     pub(crate) async fn handle_extension(
-        &self,
+        self: &Arc<Self>,
         ext_opcode: SQExtOpcode,
         mut send: C::SendStream,
         mut _recv: C::RecvStream,
     ) -> SResult<()> {
+        let authed_user = self.current_user().await?;
         match ext_opcode {
             SQExtOpcode::Conn(conn_opcode) => match conn_opcode {
                 ExtOpcodeConn::GetConnStats => {
@@ -172,18 +242,19 @@ impl<C: QuicConnection> SQServerConn<C> {
                 }
             },
             SQExtOpcode::User(user_opcode) => {
-                self.handle_user_extension(user_opcode, &mut send).await?;
+                self.handle_user_extension(&authed_user, user_opcode, &mut send)
+                    .await?;
             }
         }
         Ok(())
     }
 
     async fn handle_user_extension(
-        &self,
+        self: &Arc<Self>,
+        authed_user: &str,
         user_opcode: ExtOpcodeUser,
         send: &mut C::SendStream,
     ) -> SResult<()> {
-        let authed_user = wait_sunny_auth(&self.inner).await?;
         if !authed_user.starts_with("admin") {
             (Err::<(), SQExtError>(SQExtError::PermissionDenied))
                 .encode(send)

@@ -36,8 +36,8 @@ impl DynamicCertResolver {
     fn parse_key_and_cert(key_path: &PathBuf, cert_path: &PathBuf) -> Result<CertifiedKey, SError> {
         let cert_der: Vec<CertificateDer<'_>> = CertificateDer::pem_file_iter(cert_path)
             .map_err(|x| SError::RustlsError(x.to_string()))?
-            .filter_map(|x| x.ok())
-            .collect();
+            .collect::<Result<_, _>>()
+            .map_err(|x| SError::RustlsError(x.to_string()))?;
         let priv_key = PrivateKeyDer::from_pem_file(key_path)
             .map_err(|x| SError::RustlsError(x.to_string()))?;
 
@@ -55,22 +55,22 @@ impl DynamicCertResolver {
         cert_path: PathBuf,
     ) -> Result<(), SError> {
         use notify::{Event, RecursiveMode, Watcher};
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
             if let Ok(event) = res {
-                tx.blocking_send(event).unwrap();
+                let _ = tx.send(event);
             }
         })
-        .expect("Failed to watch certificates and private key");
+        .map_err(|x| SError::RustlsError(x.to_string()))?;
 
         watcher
             .watch(&cert_path, RecursiveMode::NonRecursive)
-            .expect("Failed to watch certificates and private key");
+            .map_err(|x| SError::RustlsError(x.to_string()))?;
 
         watcher
             .watch(&key_path, RecursiveMode::NonRecursive)
-            .expect("Failed to watch certificates and private key");
+            .map_err(|x| SError::RustlsError(x.to_string()))?;
 
         let mut last_reload = std::time::Instant::now()
             .checked_sub(Duration::from_secs(10))

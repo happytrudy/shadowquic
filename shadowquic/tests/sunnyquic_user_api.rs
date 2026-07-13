@@ -55,14 +55,16 @@ async fn sunnyquic_user_api_add_remove_list_and_permissions() {
 
     assert_eq!(add_user(&admin, "alice", "alice-pass").await, Ok(()));
     assert_users(&admin, &["admin", "bob", "admin_bob", "alice"]).await;
-    assert_authenticated("alice", "alice-pass").await;
+    let alice_old = authenticated_connection("alice", "alice-pass").await;
 
     assert_eq!(add_user(&admin, "alice", "alice-new-pass").await, Ok(()));
+    assert_connection_closed(&alice_old).await;
     assert_users(&admin, &["admin", "bob", "admin_bob", "alice"]).await;
-    assert_authenticated("alice", "alice-new-pass").await;
+    let alice_new = authenticated_connection("alice", "alice-new-pass").await;
     assert_rejected_or_timeout("alice", "alice-pass").await;
 
     assert_eq!(admin.remove_user("alice").await, Ok(()));
+    assert_connection_closed(&alice_new).await;
     assert_users(&admin, &["admin", "bob", "admin_bob"]).await;
     assert_rejected_or_timeout("alice", "alice-new-pass").await;
     assert_eq!(admin.remove_user("alice").await, Err(SQExtError::NotFound),);
@@ -229,7 +231,10 @@ async fn assert_users(client: &SunnyQuicClient, expected: &[&str]) {
     assert_eq!(users, expected);
 }
 
-async fn assert_authenticated(username: &str, password: &str) {
+async fn authenticated_connection(
+    username: &str,
+    password: &str,
+) -> shadowquic::sunnyquic::outbound::SunnyQuicConn {
     let client = client(username, password);
     let conn = client
         .get_conn()
@@ -243,6 +248,7 @@ async fn assert_authenticated(username: &str, password: &str) {
         response.is_ok() || response == Err(SQExtError::NotAvailable),
         "{username} should get an authenticated extension response"
     );
+    conn
 }
 
 async fn assert_rejected_or_timeout(username: &str, password: &str) {

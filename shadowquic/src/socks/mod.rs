@@ -30,7 +30,7 @@ impl UdpRecv for UdpSocksWrap {
             warn!("dropping fragmented udp datagram ");
             return Err(SError::ProtocolUnimpl);
         }
-        let headsize: usize = cur.position().try_into().unwrap();
+        let headsize = usize::try_from(cur.position()).map_err(|_| SError::ProtocolViolation)?;
         let buf = cur.into_inner();
         self.1
             .get_or_init(|| async {

@@ -102,21 +102,24 @@ impl SocksClient {
             ));
         }
         if let Some(username) = &self.cfg.username {
+            let password = self
+                .cfg
+                .password
+                .as_ref()
+                .ok_or(SError::SocksError("password not provided".into()))?;
+            let username_len = u8::try_from(username.len())
+                .map_err(|_| SError::SocksError("username exceeds 255 bytes".into()))?;
+            let password_len = u8::try_from(password.len())
+                .map_err(|_| SError::SocksError("password exceeds 255 bytes".into()))?;
             let auth = PasswordAuthReq {
                 version: 0x01, // This is password auth version not socks version
                 username: VarVec {
-                    len: username.len() as u8,
+                    len: username_len,
                     contents: username.as_bytes().to_vec(),
                 },
                 password: VarVec {
-                    len: self.cfg.password.as_ref().unwrap().len() as u8,
-                    contents: self
-                        .cfg
-                        .password
-                        .as_ref()
-                        .ok_or(SError::SocksError("password not provided".into()))?
-                        .as_bytes()
-                        .to_vec(),
+                    len: password_len,
+                    contents: password.as_bytes().to_vec(),
                 },
             };
             auth.encode(&mut tcp).await?;
@@ -184,9 +187,9 @@ impl SocksClient {
         let peer_addr = rep
             .bind_addr
             .to_socket_addrs()
-            .expect("socks server return a unresolvable address")
+            .map_err(|error| SError::SocksError(error.to_string()))?
             .next()
-            .expect("socks server return a unresolvable address");
+            .ok_or_else(|| SError::SocksError("SOCKS server returned no address".into()))?;
 
         let udp_socket_factory = UdpSocketFactory {
             addr: peer_addr.to_string(),
@@ -224,13 +227,11 @@ impl SocksClient {
         // control stream, in socks5 inbound, end of control stream
         // means end of udp association.
         let fut3 = async {
-            if udp_session.stream.is_none() {
+            let Some(mut stream) = udp_session.stream else {
                 return Ok(());
-            }
+            };
             let mut buf = [0u8];
-            udp_session
-                .stream
-                .unwrap()
+            stream
                 .read_exact(&mut buf)
                 .await
                 .map_err(|x| SError::UDPSessionClosed(x.to_string()))?;

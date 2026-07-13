@@ -70,7 +70,7 @@ pub struct VarVec {
 impl From<Vec<u8>> for VarVec {
     fn from(vec: Vec<u8>) -> Self {
         VarVec {
-            len: vec.len() as u8,
+            len: u8::try_from(vec.len()).unwrap_or(u8::MAX),
             contents: vec,
         }
     }
@@ -79,9 +79,12 @@ impl From<Vec<u8>> for VarVec {
 #[async_trait::async_trait]
 impl SEncode for VarVec {
     async fn encode<T: AsyncWrite + Unpin + Send>(&self, s: &mut T) -> Result<(), SError> {
+        if self.contents.len() != self.len as usize {
+            return Err(SError::ProtocolViolation);
+        }
         let buf = vec![self.len];
         s.write_all(&buf).await?;
-        s.write_all(&self.contents[0..self.len as usize]).await?;
+        s.write_all(&self.contents).await?;
         Ok(())
     }
 }
@@ -121,10 +124,7 @@ pub struct SocksAddr {
 impl SocksAddr {
     pub fn from_domain(name: String, port: u16) -> Self {
         SocksAddr {
-            addr: AddrOrDomain::Domain(VarVec {
-                len: name.len() as u8,
-                contents: name.into_bytes(),
-            }),
+            addr: AddrOrDomain::Domain(VarVec::from(name.into_bytes())),
             port,
         }
     }
@@ -179,11 +179,11 @@ impl ToSocketAddrs for SocksAddr {
 
     fn to_socket_addrs(&self) -> std::io::Result<vec::IntoIter<SocketAddr>> {
         match &self.addr {
-            AddrOrDomain::Domain(x) => (
-                std::str::from_utf8(&x.contents).expect("Domain Name is not UTF8"),
-                self.port,
-            )
-                .to_socket_addrs(),
+            AddrOrDomain::Domain(x) => {
+                let domain = std::str::from_utf8(&x.contents)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+                (domain, self.port).to_socket_addrs()
+            }
             AddrOrDomain::V4(x) => {
                 Ok(vec![SocketAddr::from((x.to_owned(), self.port))].into_iter())
             }

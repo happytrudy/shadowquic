@@ -90,7 +90,7 @@ impl Inbound for TproxyServer {
         tokio::select! {
             res = self.tcp_listener.accept() => {
                 let (stream, _) = res?;
-                tracing::info!("accepted tcp connection from {}", stream.peer_addr().unwrap());
+                tracing::info!("accepted tcp connection from {}", stream.peer_addr()?);
                 let orig_dst = stream.local_addr().map_err(|e| SError::SocksError(e.to_string()))?;
                 let dst = SocksAddr {
                     addr: match orig_dst.ip() {

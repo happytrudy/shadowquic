@@ -1,6 +1,6 @@
 use std::{
     io,
-    net::{SocketAddr, ToSocketAddrs},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::PathBuf,
 };
 
@@ -22,12 +22,10 @@ pub struct UdpSocketFactory {
 #[async_trait::async_trait]
 impl SocketFactory for UdpSocketFactory {
     async fn create_socket(&self) -> std::io::Result<socket2::Socket> {
-        let addr = self
-            .addr
-            .to_socket_addrs()
-            .unwrap_or_else(|_| panic!("resolve quic addr faile: {}", self.addr))
+        let addr = tokio::net::lookup_host(&self.addr)
+            .await?
             .next()
-            .unwrap_or_else(|| panic!("resolve quic addr faile: {}", self.addr));
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "UDP address not found"))?;
         let socket = if let Some(Interface::Address(ip)) = self.interface {
             let domain = if ip.is_ipv4() {
                 Domain::IPV4
@@ -43,7 +41,7 @@ impl SocketFactory for UdpSocketFactory {
             let try_create_dual_stack = || {
                 let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
                 socket.set_only_v6(false)?;
-                let bind_addr: SocketAddr = "[::]:0".parse().unwrap();
+                let bind_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);
                 socket.bind(&bind_addr.into())?;
                 Ok(socket) as Result<Socket, io::Error>
             };
@@ -54,12 +52,12 @@ impl SocketFactory for UdpSocketFactory {
                 socket
             } else if ipv6 {
                 let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
-                let bind_addr: SocketAddr = "[::]:0".parse().unwrap();
+                let bind_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);
                 socket.bind(&bind_addr.into())?;
                 socket
             } else {
                 let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-                let bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
+                let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
                 socket.bind(&bind_addr.into())?;
                 socket
             }
@@ -116,12 +114,10 @@ pub struct TcpSocketFactory {
 #[async_trait::async_trait]
 impl SocketFactory for TcpSocketFactory {
     async fn create_socket(&self) -> std::io::Result<socket2::Socket> {
-        let addr = self
-            .addr
-            .to_socket_addrs()
-            .unwrap_or_else(|_| panic!("resolve tcp addr faile: {}", self.addr))
+        let addr = tokio::net::lookup_host(&self.addr)
+            .await?
             .next()
-            .unwrap_or_else(|| panic!("resolve tcp addr faile: {}", self.addr));
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "TCP address not found"))?;
         let socket = if let Some(Interface::Address(ip)) = self.interface {
             let domain = if ip.is_ipv4() {
                 Domain::IPV4
@@ -136,12 +132,12 @@ impl SocketFactory for TcpSocketFactory {
             let ipv6 = addr.is_ipv6();
             if ipv6 {
                 let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
-                let bind_addr: SocketAddr = "[::]:0".parse().unwrap();
+                let bind_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);
                 socket.bind(&bind_addr.into())?;
                 socket
             } else {
                 let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
-                let bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
+                let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
                 socket.bind(&bind_addr.into())?;
                 socket
             }

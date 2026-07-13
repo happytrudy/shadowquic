@@ -1,5 +1,6 @@
 use async_trait::async_trait;
-use std::{net::ToSocketAddrs, sync::Arc};
+use std::sync::Arc;
+use tokio::net::lookup_host;
 use tokio::sync::{OnceCell, SetOnce};
 
 use super::EndClient;
@@ -46,21 +47,15 @@ impl SunnyQuicClient {
     }
 
     pub async fn get_conn(&self) -> Result<SunnyQuicConn, SError> {
-        let addr = self
-            .config
-            .addr
-            .to_socket_addrs()
-            .unwrap_or_else(|_| panic!("resolve quic addr faile: {}", self.config.addr))
+        let addr = lookup_host(&self.config.addr)
+            .await
+            .map_err(|_| SError::DomainResolveFailed(self.config.addr.clone()))?
             .next()
-            .unwrap_or_else(|| panic!("resolve quic addr faile: {}", self.config.addr));
+            .ok_or_else(|| SError::DomainResolveFailed(self.config.addr.clone()))?;
         let end = self
             .quic_end
-            .get_or_init(|| async {
-                self.init_endpoint()
-                    .await
-                    .expect("error during initialize quic endpoint")
-            })
-            .await;
+            .get_or_try_init(|| self.init_endpoint())
+            .await?;
         let conn = QuicClient::connect(end, addr, &self.config.server_name).await?;
 
         let conn = SQConn {
@@ -174,7 +169,11 @@ impl Outbound for SunnyQuicClient {
     async fn handle(&mut self, req: crate::ProxyRequest) -> Result<(), crate::error::SError> {
         self.prepare_conn().await?;
 
-        let conn = self.quic_conn.as_mut().unwrap().clone();
+        let conn = self
+            .quic_conn
+            .as_ref()
+            .ok_or(SError::OutboundUnavailable)?
+            .clone();
 
         let over_stream = self.config.over_stream;
         outbound::handle_request(req, conn, over_stream).await?;

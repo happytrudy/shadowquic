@@ -57,7 +57,7 @@ impl SocksServer {
                 user_context: None,
             })),
             SOCKS5_CMD_UDP_ASSOCIATE => {
-                let socket = Arc::new(socket.unwrap());
+                let socket = Arc::new(socket.ok_or(SError::ProtocolViolation)?);
                 Ok(ProxyRequest::Udp(UdpSession {
                     send: Arc::new(UdpSocksWrap(socket.clone(), Default::default())),
                     recv: Box::new(UdpSocksWrap(socket, Default::default())),
@@ -171,7 +171,7 @@ async fn handle_tcp(
     stream: TcpStream,
     sender: Sender<ProxyRequest>,
 ) -> SResult<()> {
-    let local_addr = to_ipv4_mapped(stream.local_addr().unwrap());
+    let local_addr = to_ipv4_mapped(stream.local_addr()?);
 
     let (s, req, socket) = handle_socks(users, stream, local_addr)
         .in_current_span()
@@ -187,7 +187,7 @@ async fn handle_tcp(
         }
         SOCKS5_CMD_UDP_ASSOCIATE => {
             info!(bind_dst = %req.dst, "udp associate request accepted");
-            let socket = Arc::new(socket.unwrap());
+            let socket = Arc::new(socket.ok_or(SError::ProtocolViolation)?);
             ProxyRequest::Udp(UdpSession {
                 send: Arc::new(UdpSocksWrap(socket.clone(), Default::default()))
                     as Arc<dyn crate::UdpSend>,

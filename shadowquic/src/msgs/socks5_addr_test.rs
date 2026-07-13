@@ -1,6 +1,8 @@
 use crate::msgs::socks5::SOCKS5_ADDR_TYPE_DOMAIN_NAME;
 
-use super::socks5::{AddrOrDomain, SOCKS5_ADDR_TYPE_IPV4, SOCKS5_ADDR_TYPE_IPV6, SocksAddr};
+use super::socks5::{
+    AddrOrDomain, SOCKS5_ADDR_TYPE_IPV4, SOCKS5_ADDR_TYPE_IPV6, SocksAddr, VarVec,
+};
 use std::io::Cursor;
 
 #[tokio::test]
@@ -187,4 +189,17 @@ async fn test_size_tagged_struct_decode_long_payload_ignores_trailing_bytes() {
             value_u8: 0x9A,
         }
     );
+}
+
+#[tokio::test]
+async fn var_vec_rejects_inconsistent_or_oversized_lengths() {
+    let mut encoded = Vec::new();
+    let inconsistent = VarVec {
+        len: 2,
+        contents: vec![1],
+    };
+    assert!(inconsistent.encode(&mut encoded).await.is_err());
+
+    let oversized = VarVec::from(vec![0; usize::from(u8::MAX) + 1]);
+    assert!(oversized.encode(&mut encoded).await.is_err());
 }

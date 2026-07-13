@@ -1,5 +1,8 @@
 use async_trait::async_trait;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use arc_swap::ArcSwap;
 use tokio::sync::{
@@ -14,8 +17,8 @@ use crate::{
     error::SError,
     msgs::squic::{SQExtError, SunnyCredential, UserStats},
     observe::Observer,
-    quic::QuicConnection,
-    squic::inbound::{SQServerConn, SunnyQuicUsers, UserManager},
+    quic::{QuicConnection, QuicErrorRepr},
+    squic::inbound::{ConnectionRegistry, SQServerConn, SunnyQuicUsers, UserManager},
     sunnyquic::EndServer,
 };
 
@@ -29,6 +32,7 @@ pub struct SunnyQuicServer {
     request_sender: Sender<ProxyRequest>,
     request: Receiver<ProxyRequest>,
     observer: Arc<Observer>,
+    connections: Arc<ConnectionRegistry>,
 }
 
 struct SunnyQuicUserManager {
@@ -36,18 +40,22 @@ struct SunnyQuicUserManager {
     users: Arc<ArcSwap<HashMap<SunnyCredential, String>>>,
     config: RwLock<SunnyQuicServerCfg>,
     observer: Arc<Observer>,
+    connections: Arc<ConnectionRegistry>,
 }
 
 #[async_trait]
 impl UserManager for SunnyQuicUserManager {
     async fn add_user(&self, user: AuthUser) -> Result<(), SQExtError> {
+        let username = user.username.clone();
         let mut config = self.config.write().await;
         let old_config = config.clone();
+        let mut password_changed = false;
         if let Some(existing_user) = config
             .users
             .iter_mut()
             .find(|existing_user| existing_user.username == user.username)
         {
+            password_changed = existing_user.password != user.password;
             existing_user.password = user.password;
         } else {
             config.users.push(user);
@@ -59,6 +67,11 @@ impl UserManager for SunnyQuicUserManager {
             return Err(SQExtError::Other(error.to_string()));
         }
         self.users.store(SunnyQuicServer::gen_users_hash(&config));
+        drop(config);
+        if password_changed {
+            self.connections.close_user(&username).await;
+            self.observer.close_conn(&username).await;
+        }
         Ok(())
     }
 
@@ -77,6 +90,8 @@ impl UserManager for SunnyQuicUserManager {
             return Err(SQExtError::Other(error.to_string()));
         }
         self.users.store(SunnyQuicServer::gen_users_hash(&config));
+        drop(config);
+        self.connections.close_user(username).await;
         self.observer.remove_user(username).await;
         Ok(())
     }
@@ -116,6 +131,7 @@ impl UserManager for SunnyQuicUserManager {
             return Err(SQExtError::NotFound);
         }
         drop(config);
+        self.connections.close_user(username).await;
         self.observer.close_conn(username).await;
         Ok(())
     }
@@ -124,16 +140,16 @@ impl UserManager for SunnyQuicUserManager {
 impl SunnyQuicServer {
     pub async fn new(cfg: SunnyQuicServerCfg) -> Result<Self, SError> {
         let (send, recv) = channel::<ProxyRequest>(10);
-        let endpoint: EndServer = QuicServer::new(&cfg)
-            .await
-            .expect("Failed to listening on udp");
+        let endpoint: EndServer = QuicServer::new(&cfg).await?;
         let users = Arc::new(ArcSwap::new(Self::gen_users_hash(&cfg)));
         let observer = Arc::new(Observer::new());
+        let connections = Arc::new(ConnectionRegistry::default());
         let user_manager = Arc::new(SunnyQuicUserManager {
             endpoint: endpoint.clone(),
             users: users.clone(),
             config: RwLock::new(cfg),
             observer: observer.clone(),
+            connections: connections.clone(),
         });
 
         Ok(Self {
@@ -143,21 +159,34 @@ impl SunnyQuicServer {
             request_sender: send,
             request: recv,
             observer,
+            connections,
         })
     }
 
     pub async fn update_config(&self, cfg: &SunnyQuicServerCfg) -> Result<(), SError> {
+        let mut current = self.user_manager.config.write().await;
+        let changed_users = changed_usernames(&current.users, &cfg.users);
         QuicServer::update_config(&self.endpoint, cfg).await?;
         self.users.store(Self::gen_users_hash(cfg));
-        *self.user_manager.config.write().await = cfg.clone();
+        *current = cfg.clone();
+        drop(current);
+        for username in changed_users {
+            self.connections.close_user(&username).await;
+            if cfg.users.iter().any(|user| user.username == username) {
+                self.observer.close_conn(&username).await;
+            } else {
+                self.observer.remove_user(&username).await;
+            }
+        }
         Ok(())
     }
 
     async fn handle_incoming<C: QuicConnection>(
         incom: C,
         req_sender: Sender<ProxyRequest>,
-        user_hash: SunnyQuicUsers,
+        users: SunnyQuicUsers,
         user_manager: Arc<dyn UserManager>,
+        connections: Arc<ConnectionRegistry>,
     ) -> Result<(), SError> {
         let sq_conn = SQServerConn {
             inner: SQConn {
@@ -169,8 +198,10 @@ impl SunnyQuicServer {
                     inner: Default::default(),
                 },
             },
-            users: user_hash,
+            users: Some(users),
+            sunny_credential: Some(Arc::new(SetOnce::new())),
             user_manager: Some(user_manager),
+            connections,
         };
         let span = info_span!("quic", id = sq_conn.inner.peer_id());
         let sq_conn = Arc::new(sq_conn);
@@ -181,7 +212,7 @@ impl SunnyQuicServer {
 
         Ok(())
     }
-    fn gen_users_hash(cfg: &SunnyQuicServerCfg) -> SunnyQuicUsers {
+    fn gen_users_hash(cfg: &SunnyQuicServerCfg) -> Arc<HashMap<SunnyCredential, String>> {
         let users = HashMap::from_iter(cfg.users.iter().map(|x| {
             let hash = crate::sunnyquic::gen_sunny_user_hash(&x.username, &x.password);
             (hash, x.username.clone())
@@ -206,21 +237,37 @@ impl Inbound for SunnyQuicServer {
         let endpoint = self.endpoint.clone();
         let users = self.users.clone();
         let user_manager = self.user_manager.clone();
+        let connections = self.connections.clone();
         let fut = async move {
+            let mut error_backoff = std::time::Duration::from_millis(10);
             loop {
                 match QuicServer::accept(&endpoint).await {
                     Ok(conn) => {
+                        error_backoff = std::time::Duration::from_millis(10);
                         let request_sender = request_sender.clone();
-                        let user_hash = users.load_full();
+                        let users = users.clone();
                         let user_manager = user_manager.clone();
+                        let connections = connections.clone();
                         tokio::spawn(async move {
-                            Self::handle_incoming(conn, request_sender, user_hash, user_manager)
-                                .await
-                                .map_err(|x| error!("{}", x))
+                            Self::handle_incoming(
+                                conn,
+                                request_sender,
+                                users,
+                                user_manager,
+                                connections,
+                            )
+                            .await
+                            .map_err(|x| error!("{}", x))
                         });
+                    }
+                    Err(QuicErrorRepr::EndpointClosed) => {
+                        tracing::info!("SunnyQUIC endpoint closed");
+                        break;
                     }
                     Err(e) => {
                         error!("Error accepting quic connection: {}", e);
+                        tokio::time::sleep(error_backoff).await;
+                        error_backoff = (error_backoff * 2).min(std::time::Duration::from_secs(1));
                     }
                 }
             }
@@ -228,4 +275,11 @@ impl Inbound for SunnyQuicServer {
         tokio::spawn(fut);
         Ok(())
     }
+}
+
+fn changed_usernames(old: &[AuthUser], new: &[AuthUser]) -> HashSet<String> {
+    old.iter()
+        .filter(|old_user| !new.iter().any(|new_user| new_user == *old_user))
+        .map(|user| user.username.clone())
+        .collect()
 }

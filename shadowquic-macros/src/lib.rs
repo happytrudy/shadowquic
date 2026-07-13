@@ -63,6 +63,8 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenTree;
 use quote::quote;
 
+const MAX_SIZE_TAG_BYTES: usize = 1024 * 1024;
+
 /// Derive [`shadowquic::SEncode`] automatically for the struct or enum.
 /// For struct, it encodes each field in order. For enum, it first encodes the discriminant as a u8/u16... defined by `#[repr(*)]`
 /// and then encodes the content based on the value of disriminant.
@@ -197,6 +199,7 @@ fn impl_struct_encode(st: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenSt
     let has_size_tag = st.attrs.iter().any(|attr| attr.path().is_ident("size_tag"));
 
     let body = if has_size_tag {
+        let max_size_tag_bytes = MAX_SIZE_TAG_BYTES;
         quote! {
             use tokio::io::AsyncWriteExt;
             let mut buf = Vec::new();
@@ -204,7 +207,10 @@ fn impl_struct_encode(st: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenSt
                 let s = &mut buf;
                 #builder_struct_fields_def
             }
-            let len = buf.len() as u32;
+            if buf.len() > #max_size_tag_bytes {
+                return Err(SError::ProtocolViolation);
+            }
+            let len = u32::try_from(buf.len()).map_err(|_| SError::ProtocolViolation)?;
             len.encode(s).await?;
             s.write_all(&buf).await?;
         }
@@ -430,9 +436,13 @@ fn impl_struct_decode(st: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenSt
     let has_size_tag = st.attrs.iter().any(|attr| attr.path().is_ident("size_tag"));
 
     let body = if has_size_tag {
+        let max_size_tag_bytes = MAX_SIZE_TAG_BYTES;
         quote! {
             use tokio::io::AsyncReadExt;
             let len = u32::decode(s).await? as usize;
+            if len > #max_size_tag_bytes {
+                return Err(SError::ProtocolViolation);
+            }
             let mut buf = vec![0u8; len];
             s.read_exact(&mut buf).await?;
             const COMPAT_PADDING_LIMIT: usize = 1024;

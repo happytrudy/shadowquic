@@ -8,7 +8,6 @@ use std::{
         hash_map::{self, Entry},
     },
     io::Cursor,
-    mem::replace,
     ops::Deref,
     sync::{Arc, atomic::AtomicU16},
     time::Duration,
@@ -22,7 +21,7 @@ use tokio::{
         watch::{Receiver, Sender, channel},
     },
 };
-use tracing::{Instrument, Level, debug, error, event, info, trace};
+use tracing::{Instrument, Level, debug, event, info, trace};
 
 use crate::{
     AnyUdpRecv, AnyUdpSend, UdpSend,
@@ -71,7 +70,7 @@ pub(crate) async fn auth_sunny<T: QuicConnection>(
         debug!("authentication request sent");
         conn.authed
             .set(Ok(username.to_string()))
-            .expect("repeated authentication");
+            .map_err(|_| SError::ProtocolViolation)?;
     }
     Ok(())
 }
@@ -87,45 +86,91 @@ impl<T: QuicConnection> Deref for SQConn<T> {
 pub(crate) struct NotifyBuffer {
     pub(crate) notify: Sender<()>,
     pub(crate) buffer: Vec<Bytes>,
+    pub(crate) buffered_bytes: usize,
 }
+
+impl NotifyBuffer {
+    fn new(notify: Sender<()>) -> Self {
+        Self {
+            notify,
+            buffer: Vec::new(),
+            buffered_bytes: 0,
+        }
+    }
+
+    fn push(&mut self, packet: Bytes) -> SResult<()> {
+        let buffered_bytes = self
+            .buffered_bytes
+            .checked_add(packet.len())
+            .ok_or(SError::ProtocolViolation)?;
+        if self.buffer.len() >= MAX_PENDING_PACKETS_PER_CONTEXT
+            || buffered_bytes > MAX_PENDING_BYTES_PER_CONTEXT
+        {
+            return Err(SError::ProtocolViolation);
+        }
+        self.buffered_bytes = buffered_bytes;
+        self.buffer.push(packet);
+        Ok(())
+    }
+}
+
+const MAX_CONTEXT_IDS: usize = 4096;
+const MAX_PENDING_CONTEXTS: usize = 128;
+const MAX_PENDING_PACKETS_PER_CONTEXT: usize = 32;
+const MAX_PENDING_BYTES_PER_CONTEXT: usize = 256 * 1024;
 
 // Use watch channel here. Notify is not suitable here
 // see https://github.com/tokio-rs/tokio/issues/3757
 type IDStoreVal<T> = Result<T, NotifyBuffer>;
+
+enum SocketLookup<T> {
+    Ready(T),
+    Wait(Receiver<()>),
+}
 /// IDStore is a thread-safe store for managing UDP sockets and their associated ids.
 /// It uses a HashMap to store the mapping between ids and the destination addresses as well as associated sockets.
 /// It also uses an atomic counter to generate unique ids for new sockets.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct IDStore<T = (AnyUdpSend, SocksAddr)> {
     pub(crate) id_counter: Arc<AtomicU16>,
     pub(crate) inner: Arc<RwLock<HashMap<u16, IDStoreVal<T>>>>,
+}
+
+impl<T> Default for IDStore<T> {
+    fn default() -> Self {
+        Self {
+            id_counter: Arc::new(AtomicU16::new(0)),
+            inner: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
 }
 
 impl<T> IDStore<T>
 where
     T: Clone,
 {
-    async fn get_socket_or_notify(&self, id: u16) -> Result<T, Receiver<()>> {
+    async fn get_socket_or_notify(&self, id: u16) -> SResult<SocketLookup<T>> {
         if let Some(r) = self.inner.read().await.get(&id) {
-            r.as_ref().map_err(|x| x.notify.subscribe()).cloned()
+            return Ok(match r {
+                Ok(value) => SocketLookup::Ready(value.clone()),
+                Err(pending) => SocketLookup::Wait(pending.notify.subscribe()),
+            });
+        }
+
+        let mut inner = self.inner.write().await;
+        if let Some(r) = inner.get(&id) {
+            Ok(match r {
+                Ok(value) => SocketLookup::Ready(value.clone()),
+                Err(pending) => SocketLookup::Wait(pending.notify.subscribe()),
+            })
         } else {
-            // Need to recheck
-            // During change from read lock to write lock, hashmap may be modified
-            match self.inner.write().await.entry(id) {
-                Entry::Occupied(occupied_entry) => occupied_entry
-                    .get()
-                    .as_ref()
-                    .map_err(|x| x.notify.subscribe())
-                    .cloned(),
-                Entry::Vacant(vacant_entry) => {
-                    let (s, r) = channel(());
-                    vacant_entry.insert(Err(NotifyBuffer {
-                        notify: s,
-                        buffer: Vec::new(),
-                    }));
-                    Err(r)
-                }
+            let pending_contexts = inner.values().filter(|value| value.is_err()).count();
+            if inner.len() >= MAX_CONTEXT_IDS || pending_contexts >= MAX_PENDING_CONTEXTS {
+                return Err(SError::ProtocolViolation);
             }
+            let (sender, receiver) = channel(());
+            inner.insert(id, Err(NotifyBuffer::new(sender)));
+            Ok(SocketLookup::Wait(receiver))
         }
     }
     async fn try_get_socket(&self, id: u16) -> Option<T> {
@@ -139,11 +184,12 @@ where
         }
     }
     async fn get_socket_or_wait(&self, id: u16) -> Result<T, SError> {
-        match self.get_socket_or_notify(id).await {
-            Ok(r) => Ok(r),
-            Err(mut n) => {
+        match self.get_socket_or_notify(id).await? {
+            SocketLookup::Ready(value) => Ok(value),
+            SocketLookup::Wait(mut receiver) => {
                 // This may fail is UDP session is closed right at this moment.
-                n.changed()
+                receiver
+                    .changed()
                     .await
                     .map_err(|_| SError::UDPSessionClosed("notify sender dropped".to_string()))?;
                 //
@@ -155,121 +201,97 @@ where
             }
         }
     }
-    #[allow(dead_code)]
-    async fn store_socket(&self, id: u16, val: T) -> Option<Vec<Bytes>> {
-        let mut h = self.inner.write().await;
-        trace!("receiving side alive socket number: {}", h.len());
-        let r = h.get_mut(&id);
-        if let Some(s) = r {
-            match s {
-                Ok(_) => {
-                    error!("id:{} already exists", id);
-                }
-                Err(_) => {
-                    let notify = replace(s, Ok(val));
-                    //let _ = notify.map_err(|x| x.notify_one());
-                    match notify {
-                        Ok(_) => {
-                            panic!("should be notify"); // should never happen
-                        }
-                        Err(n) => {
-                            n.notify.send(()).unwrap_or_else(|_| {
-                                debug!("id:{} notifier without subscriber", id)
-                            });
-                            event!(Level::TRACE, "notify socket id:{}", id);
-                            return Some(n.buffer);
-                        }
-                    }
-                }
-            }
-        } else {
-            h.insert(id, Ok(val));
-        }
-        None
-    }
-    async fn fetch_new_id(&self, val: T) -> u16 {
+    async fn fetch_new_id(&self, val: T) -> SResult<u16> {
         let mut inner = self.inner.write().await;
         trace!("sending side socket number: {}", inner.len());
-        let mut r;
-        loop {
-            r = self
+        if inner.len() >= MAX_CONTEXT_IDS {
+            return Err(SError::ProtocolViolation);
+        }
+        for _ in 0..=u16::MAX {
+            let id = self
                 .id_counter
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst); // Wrapping occured if overflow
-            if let Entry::Vacant(e) = inner.entry(r) {
-                e.insert(Ok(val));
-                break;
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Entry::Vacant(entry) = inner.entry(id) {
+                entry.insert(Ok(val));
+                return Ok(id);
             }
         }
-        r
+        Err(SError::ProtocolViolation)
     }
 }
 
 impl IDStore {
     async fn feed_datagram(&self, id: u16, packet: Bytes) -> SResult<()> {
-        if let Some(Ok((socket, addr))) = self.inner.read().await.get(&id) {
+        let ready = {
+            let inner = self.inner.read().await;
+            inner.get(&id).and_then(|value| match value {
+                Ok((socket, addr)) => Some((socket.clone(), addr.clone())),
+                Err(_) => None,
+            })
+        };
+        if let Some((socket, addr)) = ready {
             socket.send_to(packet, addr.clone()).await?;
-            Ok(())
-        } else {
-            // Need to recheck
-            // During change from read lock to write lock, hashmap may be modified
-            match self.inner.write().await.entry(id) {
-                Entry::Occupied(mut entry) => match entry.get_mut() {
-                    Ok((socket, addr)) => {
-                        socket.send_to(packet, addr.clone()).await?;
-                        Ok(())
-                    }
-                    Err(notify) => {
-                        notify.buffer.push(packet);
-                        Ok(())
-                    }
-                },
-                Entry::Vacant(vacant_entry) => {
-                    let (s, _r) = channel(());
-                    vacant_entry.insert(Err(NotifyBuffer {
-                        notify: s,
-                        buffer: vec![packet],
-                    }));
-                    Ok(())
-                }
-            }
+            return Ok(());
         }
+
+        let ready = {
+            let mut inner = self.inner.write().await;
+            if let Some(value) = inner.get_mut(&id) {
+                match value {
+                    Ok((socket, addr)) => Some((socket.clone(), addr.clone())),
+                    Err(pending) => {
+                        pending.push(packet.clone())?;
+                        None
+                    }
+                }
+            } else {
+                let pending_contexts = inner.values().filter(|value| value.is_err()).count();
+                if inner.len() >= MAX_CONTEXT_IDS || pending_contexts >= MAX_PENDING_CONTEXTS {
+                    return Err(SError::ProtocolViolation);
+                }
+                let (sender, _receiver) = channel(());
+                let mut pending = NotifyBuffer::new(sender);
+                pending.push(packet.clone())?;
+                inner.insert(id, Err(pending));
+                None
+            }
+        };
+        if let Some((socket, addr)) = ready {
+            socket.send_to(packet, addr).await?;
+        }
+        Ok(())
     }
     async fn store_socket_with_prelude(
         &self,
         id: u16,
         val: (Arc<dyn UdpSend>, SocksAddr),
     ) -> SResult<()> {
-        let mut h = self.inner.write().await;
-        trace!("receiving side alive socket number: {}", h.len());
-        let r = h.get_mut(&id);
-        if let Some(s) = r {
-            match s {
-                Ok(_) => {
-                    error!("id:{} already exists", id);
+        let pending = {
+            let mut inner = self.inner.write().await;
+            trace!("receiving side alive socket number: {}", inner.len());
+            if let Some(value) = inner.get_mut(&id) {
+                if value.is_ok() {
+                    return Err(SError::ProtocolViolation);
                 }
-                Err(_) => {
-                    let (socket, addr) = val.clone();
-                    let notify = replace(s, Ok(val));
-                    //let _ = notify.map_err(|x| x.notify_one());
-                    match notify {
-                        Ok(_) => {
-                            panic!("should be notify"); // should never happen
-                        }
-                        Err(n) => {
-                            for bytes in n.buffer {
-                                socket.send_to(bytes, addr.clone()).await?;
-                            }
-
-                            n.notify.send(()).unwrap_or_else(|_| {
-                                debug!("id:{} notifier without subscriber", id)
-                            });
-                            event!(Level::TRACE, "notify socket id:{}", id);
-                        }
-                    }
+                let previous = std::mem::replace(value, Ok(val.clone()));
+                previous.err().ok_or(SError::ProtocolViolation)?
+            } else {
+                if inner.len() >= MAX_CONTEXT_IDS {
+                    return Err(SError::ProtocolViolation);
                 }
+                inner.insert(id, Ok(val));
+                return Ok(());
             }
-        } else {
-            h.insert(id, Ok(val));
+        };
+
+        pending
+            .notify
+            .send(())
+            .unwrap_or_else(|_| debug!("id:{} notifier without subscriber", id));
+        event!(Level::TRACE, "notify socket id:{}", id);
+        let (socket, addr) = val;
+        for bytes in pending.buffer {
+            socket.send_to(bytes, addr.clone()).await?;
         }
         Ok(())
     }
@@ -285,14 +307,14 @@ struct AssociateSendSession<W: AsyncWrite> {
     unistream_map: HashMap<SocksAddr, W>,
 }
 impl<W: AsyncWrite> AssociateSendSession<W> {
-    pub async fn get_id_or_insert(&mut self, addr: &SocksAddr) -> (u16, bool) {
+    pub async fn get_id_or_insert(&mut self, addr: &SocksAddr) -> SResult<(u16, bool)> {
         if let Some(id) = self.dst_map.get(addr) {
-            (*id, false)
+            Ok((*id, false))
         } else {
-            let id = self.id_store.fetch_new_id(()).await;
+            let id = self.id_store.fetch_new_id(()).await?;
             self.dst_map.insert(addr.clone(), id);
             debug!(context_id = id, dst = %addr, "send session insert");
-            (id, true)
+            Ok((id, true))
         }
     }
 }
@@ -301,7 +323,10 @@ impl<W: AsyncWrite> Drop for AssociateSendSession<W> {
     fn drop(&mut self) {
         let id_store = self.id_store.inner.clone();
         let id_remove = self.dst_map.clone();
-        tokio::spawn(
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        runtime.spawn(
             async move {
                 let mut id_store = id_store.write().await;
                 let len = id_store.len();
@@ -336,13 +361,14 @@ impl AssociateRecvSession {
         dst: SocksAddr,
         socks: AnyUdpSend,
     ) -> SResult<()> {
-        if let hash_map::Entry::Vacant(e) = self.id_map.entry(id) {
-            self.id_store
-                .store_socket_with_prelude(id, (socks, dst.clone()))
-                .await?;
-            debug!(context_id = id, dst = %dst, "recv session insert");
-            e.insert(dst);
-        }
+        let hash_map::Entry::Vacant(entry) = self.id_map.entry(id) else {
+            return Err(SError::ProtocolViolation);
+        };
+        self.id_store
+            .store_socket_with_prelude(id, (socks, dst.clone()))
+            .await?;
+        debug!(context_id = id, dst = %dst, "recv session insert");
+        entry.insert(dst);
         Ok(())
     }
 }
@@ -351,7 +377,10 @@ impl Drop for AssociateRecvSession {
     fn drop(&mut self) {
         let id_store = self.id_store.inner.clone();
         let id_remove = self.id_map.clone();
-        tokio::spawn(
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        runtime.spawn(
             async move {
                 let mut id_store = id_store.write().await;
                 let len = id_store.len();
@@ -390,7 +419,7 @@ pub async fn handle_udp_send<C: QuicConnection>(
     let quic_conn = conn.conn.clone();
     loop {
         let (bytes, dst) = down_stream.recv_from().await?;
-        let (id, is_new) = session.get_id_or_insert(&dst).await;
+        let (id, is_new) = session.get_id_or_insert(&dst).await?;
         //let span = trace_span!("udp", id = id);
         let ctl_header = SQUdpControlHeader {
             dst: dst.clone(),
@@ -416,7 +445,10 @@ pub async fn handle_udp_send<C: QuicConnection>(
 
             if over_stream {
                 // Must be opened and inserted.
-                let conn = session.unistream_map.get_mut(&dst).unwrap();
+                let conn = session
+                    .unistream_map
+                    .get_mut(&dst)
+                    .ok_or(SError::ProtocolViolation)?;
                 let mut head = Vec::<u8>::new();
                 if is_new {
                     dg_header.encode(&mut head).await?
@@ -453,10 +485,7 @@ pub async fn handle_udp_recv_ctrl<C: QuicConnection>(
     loop {
         let SQUdpControlHeader { id, dst } = SQUdpControlHeader::decode(&mut recv).await?;
         info!(context_id = id, dst = %dst, "udp control header received");
-        let _ = session
-            .store_socket(id, dst, udp_socket.clone())
-            .await
-            .map_err(|e| error!("failed to writing data to udp socket:{e}"));
+        session.store_socket(id, dst, udp_socket.clone()).await?;
     }
     #[allow(unreachable_code)]
     Ok(())
@@ -518,4 +547,115 @@ pub async fn handle_udp_packet_recv<C: QuicConnection>(conn: SQConn<C>) -> Resul
     }
     #[allow(unreachable_code)]
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{net::SocketAddr, sync::Mutex};
+
+    use async_trait::async_trait;
+
+    use super::{
+        IDStore, MAX_CONTEXT_IDS, MAX_PENDING_BYTES_PER_CONTEXT, MAX_PENDING_CONTEXTS,
+        MAX_PENDING_PACKETS_PER_CONTEXT,
+    };
+    use crate::{UdpSend, error::SError, msgs::socks5::SocksAddr};
+    use bytes::Bytes;
+
+    #[derive(Default)]
+    struct RecordingUdpSend {
+        packets: Mutex<Vec<Bytes>>,
+    }
+
+    #[async_trait]
+    impl UdpSend for RecordingUdpSend {
+        async fn send_to(&self, buf: Bytes, _addr: SocksAddr) -> Result<usize, SError> {
+            let len = buf.len();
+            self.packets.lock().unwrap().push(buf);
+            Ok(len)
+        }
+    }
+
+    fn target() -> SocksAddr {
+        SocksAddr::from("127.0.0.1:53".parse::<SocketAddr>().unwrap())
+    }
+
+    #[tokio::test]
+    async fn pending_datagrams_are_bounded() {
+        let store = IDStore::default();
+        for _ in 0..MAX_PENDING_PACKETS_PER_CONTEXT {
+            store
+                .feed_datagram(1, Bytes::from_static(b"x"))
+                .await
+                .unwrap();
+        }
+        assert!(matches!(
+            store.feed_datagram(1, Bytes::from_static(b"x")).await,
+            Err(SError::ProtocolViolation)
+        ));
+
+        let store = IDStore::default();
+        assert!(matches!(
+            store
+                .feed_datagram(1, Bytes::from(vec![0; MAX_PENDING_BYTES_PER_CONTEXT + 1]),)
+                .await,
+            Err(SError::ProtocolViolation)
+        ));
+    }
+
+    #[tokio::test]
+    async fn pending_contexts_are_bounded() {
+        let store = IDStore::default();
+        for id in 0..MAX_PENDING_CONTEXTS as u16 {
+            store
+                .feed_datagram(id, Bytes::from_static(b"x"))
+                .await
+                .unwrap();
+        }
+        assert!(matches!(
+            store
+                .feed_datagram(MAX_PENDING_CONTEXTS as u16, Bytes::from_static(b"x"))
+                .await,
+            Err(SError::ProtocolViolation)
+        ));
+    }
+
+    #[tokio::test]
+    async fn installing_socket_releases_lock_before_io_and_rejects_duplicates() {
+        let store = IDStore::default();
+        store
+            .feed_datagram(7, Bytes::from_static(b"buffered"))
+            .await
+            .unwrap();
+        let sender = std::sync::Arc::new(RecordingUdpSend::default());
+        store
+            .store_socket_with_prelude(7, (sender.clone(), target()))
+            .await
+            .unwrap();
+
+        assert!(store.inner.try_write().is_ok());
+        assert_eq!(
+            sender.packets.lock().unwrap().as_slice(),
+            [Bytes::from_static(b"buffered")]
+        );
+        assert!(matches!(
+            store.store_socket_with_prelude(7, (sender, target())).await,
+            Err(SError::ProtocolViolation)
+        ));
+    }
+
+    #[tokio::test]
+    async fn context_id_exhaustion_returns_an_error() {
+        let store = IDStore::<()>::default();
+        {
+            let mut inner = store.inner.write().await;
+            for id in 0..MAX_CONTEXT_IDS as u16 {
+                inner.insert(id, Ok(()));
+            }
+        }
+        assert!(matches!(
+            store.fetch_new_id(()).await,
+            Err(SError::ProtocolViolation)
+        ));
+    }
 }

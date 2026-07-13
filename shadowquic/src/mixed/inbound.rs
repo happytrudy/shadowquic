@@ -43,7 +43,7 @@ async fn handle_connection(
 ) -> SResult<()> {
     use tokio::io::AsyncReadExt;
 
-    let local_addr = to_ipv4_mapped(stream.local_addr().unwrap());
+    let local_addr = to_ipv4_mapped(stream.local_addr()?);
     let first_byte = stream.read_u8().await?;
 
     let req = if first_byte == 0x05 {

@@ -126,3 +126,23 @@ async fn test_macro_expand_req() {
         Authenticate,
     }
 }
+
+#[tokio::test]
+async fn size_tag_rejects_oversized_payload_before_allocation() {
+    #[derive(SDecode)]
+    #[size_tag]
+    struct TaggedValue {
+        _value: u8,
+    }
+
+    let mut encoded = std::io::Cursor::new(
+        u32::try_from(1024 * 1024 + 1)
+            .unwrap()
+            .to_be_bytes()
+            .to_vec(),
+    );
+    assert!(matches!(
+        TaggedValue::decode(&mut encoded).await,
+        Err(SError::ProtocolViolation)
+    ));
+}
