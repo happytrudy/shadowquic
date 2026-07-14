@@ -7,7 +7,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
     config::SunnyQuicServerCfg,
-    error::SResult,
+    error::{SError, SResult},
     quic::{QuicClient, QuicConnection, QuicErrorRepr, QuicServer},
 };
 
@@ -22,7 +22,7 @@ impl QuicClient for EndClient {
     type C = Connection;
 
     async fn new(_cfg: &Self::SC) -> crate::error::SResult<Self> {
-        unimplemented!()
+        Err(SError::ProtocolUnimpl)
     }
 
     async fn connect(
@@ -30,14 +30,16 @@ impl QuicClient for EndClient {
         _addr: std::net::SocketAddr,
         _server_name: &str,
     ) -> Result<Self::C, crate::quic::QuicErrorRepr> {
-        unimplemented!()
+        Err(QuicErrorRepr::QuicConnect(
+            "SunnyQUIC backend is not enabled".into(),
+        ))
     }
 
     async fn new_with_socket_factory(
         _cfg: &Self::SC,
         _socket_factory: std::sync::Arc<dyn crate::utils::socket_opt::SocketFactory>,
     ) -> crate::error::SResult<Self> {
-        unimplemented!()
+        Err(SError::ProtocolUnimpl)
     }
 }
 #[derive(Clone)]
@@ -52,7 +54,10 @@ impl AsyncRead for RecvStream {
         _cx: &mut std::task::Context<'_>,
         _buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        unimplemented!()
+        std::task::Poll::Ready(Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "SunnyQUIC backend is not enabled",
+        )))
     }
 }
 
@@ -62,21 +67,30 @@ impl AsyncWrite for SendStream {
         _cx: &mut std::task::Context<'_>,
         _buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
-        unimplemented!()
+        std::task::Poll::Ready(Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "SunnyQUIC backend is not enabled",
+        )))
     }
 
     fn poll_flush(
         self: std::pin::Pin<&mut Self>,
         _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        unimplemented!()
+        std::task::Poll::Ready(Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "SunnyQUIC backend is not enabled",
+        )))
     }
 
     fn poll_shutdown(
         self: std::pin::Pin<&mut Self>,
         _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        unimplemented!()
+        std::task::Poll::Ready(Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "SunnyQUIC backend is not enabled",
+        )))
     }
 }
 
@@ -86,42 +100,42 @@ impl QuicConnection for Connection {
     type SendStream = SendStream;
 
     async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream, u64), QuicErrorRepr> {
-        unimplemented!()
+        Err(backend_disabled())
     }
 
     async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream, u64), QuicErrorRepr> {
-        unimplemented!()
+        Err(backend_disabled())
     }
 
     async fn open_uni(&self) -> Result<(Self::SendStream, u64), QuicErrorRepr> {
-        unimplemented!()
+        Err(backend_disabled())
     }
 
     async fn accept_uni(&self) -> Result<(Self::RecvStream, u64), QuicErrorRepr> {
-        unimplemented!()
+        Err(backend_disabled())
     }
 
     async fn read_datagram(&self) -> Result<bytes::Bytes, QuicErrorRepr> {
-        unimplemented!()
+        Err(backend_disabled())
     }
 
     async fn send_datagram(&self, _bytes: bytes::Bytes) -> Result<(), QuicErrorRepr> {
-        unimplemented!()
+        Err(backend_disabled())
     }
 
     fn close_reason(&self) -> Option<QuicErrorRepr> {
-        unimplemented!()
+        Some(backend_disabled())
     }
 
     fn remote_address(&self) -> std::net::SocketAddr {
-        unimplemented!()
+        std::net::SocketAddr::from(([0, 0, 0, 0], 0))
     }
 
     fn peer_id(&self) -> u64 {
-        unimplemented!()
+        0
     }
     fn close(&self, _error_code: u64, _reason: &[u8]) {
-        unimplemented!()
+        // There is no underlying transport to close.
     }
 }
 
@@ -134,14 +148,18 @@ impl QuicServer for EndServer {
     where
         Self: Sized,
     {
-        unimplemented!()
+        Err(SError::ProtocolUnimpl)
     }
 
     async fn accept(&self) -> Result<Self::C, QuicErrorRepr> {
-        unimplemented!()
+        Err(backend_disabled())
     }
 
     async fn update_config(&self, _cfg: &Self::SC) -> SResult<()> {
-        unimplemented!()
+        Err(SError::ProtocolUnimpl)
     }
+}
+
+fn backend_disabled() -> QuicErrorRepr {
+    QuicErrorRepr::QuicBaseError("SunnyQUIC backend is not enabled".into())
 }

@@ -17,8 +17,8 @@ pub(crate) type SunnyCredential = Arc<[u8; SUNNY_QUIC_AUTH_LEN]>;
 pub enum SQReq {
     SQConnect(SocksAddr) = 0x1,
     SQBind(SocksAddr) = 0x2,
-    SQAssociatOverDatagram(SocksAddr) = 0x3,
-    SQAssociatOverStream(SocksAddr) = 0x4,
+    SQAssociateOverDatagram(SocksAddr) = 0x3,
+    SQAssociateOverStream(SocksAddr) = 0x4,
     SQAuthenticate(SunnyCredential) = 0x5,
     SQExtension(SQExtOpcode) = 0xFF,
 }
@@ -26,7 +26,7 @@ pub enum SQReq {
 #[derive(PartialEq)]
 #[repr(u64)]
 #[derive(SEncode, SDecode)]
-/// SQ Extention Opcode
+/// SQ Extension Opcode
 pub enum SQExtOpcode {
     /// Connection related opcode
     Conn(ExtOpcodeConn) = 0x1,
@@ -121,8 +121,8 @@ async fn test_macro_expand_req() {
     pub enum Cmd {
         Connect,
         Bind = 0x8,
-        AssociatOverDatagram,
-        AssociatOverStream = TEST_CONST,
+        AssociateOverDatagram,
+        AssociateOverStream = TEST_CONST,
         Authenticate,
     }
 }

@@ -170,11 +170,7 @@ impl UdpSend for TproxyUdpSend {
                 Ok(g) => g,
                 Err(e) => return Poll::Ready(Err(SError::SocksError(e.to_string()))),
             };
-            let dest_sockaddr = if self.client_addr.is_ipv6() {
-                socket2::SockAddr::from(SocketAddr::new(self.client_addr.ip(), 0))
-            } else {
-                socket2::SockAddr::from(self.client_addr)
-            };
+            let dest_sockaddr = socket2::SockAddr::from(self.client_addr);
 
             let errno = unsafe {
                 libc::sendto(
@@ -260,6 +256,7 @@ async fn handle_udp_tproxy(
         HashMap::new();
     const MAX_UDP_PAYLOAD_SIZE: usize = 65536;
     const UDP_GRO_MAX_SEGMENTS: usize = 64;
+    const MAX_UDP_SESSIONS: usize = 4096;
 
     let mut buf = vec![MaybeUninit::uninit(); MAX_UDP_PAYLOAD_SIZE * UDP_GRO_MAX_SEGMENTS];
     let idle_timeout = std::time::Duration::from_secs(300);
@@ -284,6 +281,15 @@ async fn handle_udp_tproxy(
                             *last_active = now;
                             tx.clone()
                         } else {
+                            if sessions.len() >= MAX_UDP_SESSIONS
+                                && let Some(oldest) = sessions
+                                    .iter()
+                                    .min_by_key(|(_, (_, last_active))| *last_active)
+                                    .map(|(address, _)| *address)
+                            {
+                                sessions.remove(&oldest);
+                                tracing::warn!(%oldest, "evicted oldest TProxy UDP session");
+                            }
                             tracing::info!("accepted udp connection from {}", client_addr);
                             let (tx, rx) = channel(1024);
                             let send = Arc::new(TproxyUdpSend {

@@ -1,9 +1,10 @@
+#![allow(deprecated)]
+
 use std::future::poll_fn;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::SocketAddr;
 use std::ops::Deref;
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::{fs, io, u8};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -11,14 +12,7 @@ use gm_quic::prelude::handy::{ToCertificate, client_parameters, server_parameter
 
 use gm_quic::prelude::StreamReader;
 use gm_quic::prelude::StreamWriter;
-use gm_quic::prelude::handy::ToPrivateKey;
-
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::{RootCertStore, crypto};
-use thiserror::Error;
-
-// Add import for DefaultSeqLogger
-//use qevent::telemetry::DefaultSeqLogger;
+use rustls::RootCertStore;
 
 use crate::config::{SunnyQuicClientCfg, SunnyQuicServerCfg};
 use crate::error::SError;
@@ -38,6 +32,8 @@ pub struct Connection {
     inner: Arc<gm_quic::prelude::Connection>,
     datagram_reader: gm_quic::prelude::DatagramReader,
     datagram_writer: gm_quic::prelude::DatagramWriter,
+    remote_address: SocketAddr,
+    peer_id: u64,
 }
 
 #[async_trait]
@@ -54,24 +50,27 @@ impl QuicClient for gm_quic::prelude::QuicClient {
 
         let mut cli_para = client_parameters();
         cli_para
-            .set(qbase::param::ParameterId::InitialMaxData, 32 * 1024 * 1024)
-            .unwrap();
+            .set(
+                gm_quic::qbase::param::ParameterId::InitialMaxData,
+                32 * 1024 * 1024,
+            )
+            .map_err(parameter_error)?;
         cli_para
             .set(
-                qbase::param::ParameterId::InitialMaxStreamDataBidiLocal,
+                gm_quic::qbase::param::ParameterId::InitialMaxStreamDataBidiLocal,
                 16 * 1024 * 1024,
             )
-            .unwrap();
+            .map_err(parameter_error)?;
         cli_para
             .set(
-                qbase::param::ParameterId::InitialMaxStreamDataBidiRemote,
+                gm_quic::qbase::param::ParameterId::InitialMaxStreamDataBidiRemote,
                 16 * 1024 * 1024,
             )
-            .unwrap();
+            .map_err(parameter_error)?;
 
         cli_para
             .set(gm_quic::prelude::ParameterId::MaxDatagramFrameSize, 2000)
-            .unwrap();
+            .map_err(parameter_error)?;
 
         let mut client = gm_quic::prelude::QuicClient::builder()
             .with_root_certificates(roots)
@@ -98,11 +97,16 @@ impl QuicClient for gm_quic::prelude::QuicClient {
         addr: std::net::SocketAddr,
         server_name: &str,
     ) -> Result<Self::C, QuicErrorRepr> {
-        let conn = self.connected_to(server_name, [addr]).unwrap();
+        let conn = self
+            .connected_to(server_name, [addr])
+            .map_err(|error| QuicErrorRepr::QuicConnect(error.to_string()))?;
+        let peer_id = connection_id(&conn);
         Ok(Connection {
             datagram_reader: conn.unreliable_reader()??,
             datagram_writer: conn.unreliable_writer().await??,
             inner: conn.into(),
+            remote_address: addr,
+            peer_id,
         })
     }
 }
@@ -112,7 +116,11 @@ impl QuicConnection for Connection {
     type SendStream = StreamWriter;
     type RecvStream = StreamReader;
     async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream, u64), QuicErrorRepr> {
-        let (id, (r, w)) = self.inner.open_bi_stream().await?.unwrap();
+        let (id, (r, w)) = self
+            .inner
+            .open_bi_stream()
+            .await?
+            .ok_or(QuicErrorRepr::EndpointClosed)?;
         Ok((w, r, id.id()))
     }
     async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream, u64), QuicErrorRepr> {
@@ -120,7 +128,11 @@ impl QuicConnection for Connection {
         Ok((w, r, id.id()))
     }
     async fn open_uni(&self) -> Result<(Self::SendStream, u64), QuicErrorRepr> {
-        let (id, w) = self.inner.open_uni_stream().await?.unwrap();
+        let (id, w) = self
+            .inner
+            .open_uni_stream()
+            .await?
+            .ok_or(QuicErrorRepr::EndpointClosed)?;
         Ok((w, id.id()))
     }
     async fn accept_uni(&self) -> Result<(Self::RecvStream, u64), QuicErrorRepr> {
@@ -134,28 +146,20 @@ impl QuicConnection for Connection {
     }
     async fn send_datagram(&self, bytes: Bytes) -> Result<(), QuicErrorRepr> {
         self.datagram_writer.send_bytes(bytes)?;
-        //tracing::info!("Sent datagram");
         Ok(())
     }
     fn close_reason(&self) -> Option<QuicErrorRepr> {
-        // match self.deref().is_active() {
-        //     true => None,
-        //     false => Some(QuicErrorRepr::QuicError(qbase::error::Error::new(
-        //         "Connection closed",
-        //     ))),
-        // }
         None
     }
     fn remote_address(&self) -> SocketAddr {
-        "0.0.0.0:0".parse().unwrap()
+        self.remote_address
     }
     fn peer_id(&self) -> u64 {
-        let mut id: [u8; 8] = [0; 8];
-        id.copy_from_slice(self.inner.origin_dcid().unwrap().as_ref());
-        u64::from_be_bytes(id)
+        self.peer_id
     }
     fn close(&self, error_code: u64, reason: &[u8]) {
-        unimplemented!()
+        let reason = String::from_utf8_lossy(reason).into_owned();
+        let _ = self.inner.close(reason, error_code);
     }
 }
 
@@ -165,44 +169,40 @@ impl QuicServer for EndServer {
     type SC = SunnyQuicServerCfg;
 
     async fn new(cfg: &SunnyQuicServerCfg) -> crate::error::SResult<Self> {
-        // let qlogger: Arc<dyn qevent::telemetry::Log + Send + Sync> =
-        //     Arc::new(DefaultSeqLogger::new(PathBuf::from("./server.qlog")));
-
-        // crypto.alpn_protocols = cfg
-        //     .alpn
-        //     .iter()
-        //     .cloned()
-        //     .map(|alpn| alpn.into_bytes())
-        //     .collect();
-        // crypto.max_early_data_size = if cfg.zero_rtt { u32::MAX } else { 0 };
-        // crypto.send_half_rtt_data = cfg.zero_rtt;
-
         let mut server_para = server_parameters();
         server_para
-            .set(qbase::param::ParameterId::InitialMaxData, 16 * 1024 * 1024)
-            .unwrap();
+            .set(
+                gm_quic::qbase::param::ParameterId::InitialMaxData,
+                16 * 1024 * 1024,
+            )
+            .map_err(parameter_error)?;
         server_para
             .set(
-                qbase::param::ParameterId::InitialMaxStreamDataBidiLocal,
+                gm_quic::qbase::param::ParameterId::InitialMaxStreamDataBidiLocal,
                 8 * 1024 * 1024,
             )
-            .unwrap();
+            .map_err(parameter_error)?;
         server_para
             .set(
-                qbase::param::ParameterId::InitialMaxStreamDataBidiRemote,
+                gm_quic::qbase::param::ParameterId::InitialMaxStreamDataBidiRemote,
                 8 * 1024 * 1024,
             )
-            .unwrap();
+            .map_err(parameter_error)?;
 
         server_para
             .set(gm_quic::prelude::ParameterId::MaxDatagramFrameSize, 2000)
-            .unwrap();
+            .map_err(parameter_error)?;
 
-        let listeners = gm_quic::prelude::QuicListeners::builder()
+        let builder = gm_quic::prelude::QuicListeners::builder()
             .map_err(|x| SError::QuicError(x.into()))?
             .with_parameters(server_para)
-            .without_client_cert_verifier()
-            .enable_0rtt()
+            .without_client_cert_verifier();
+        let builder = if cfg.zero_rtt {
+            builder.enable_0rtt()
+        } else {
+            builder
+        };
+        let listeners = builder
             .with_alpns(cfg.alpn.iter().map(|alpn| alpn.clone().into_bytes()))
             .listen(128);
         listeners
@@ -213,12 +213,23 @@ impl QuicServer for EndServer {
                 [cfg.bind_addr],
                 None,
             )
-            .unwrap();
+            .map_err(|error| {
+                SError::QuicError(QuicErrorRepr::QuicListenerBuilderError(error.to_string()))
+            })?;
         Ok(listeners)
     }
 
     async fn accept(&self) -> Result<Self::C, QuicErrorRepr> {
-        let (conn, sni, path, link) = self.deref().accept().await.unwrap();
+        let (conn, sni, _path, link) = self
+            .deref()
+            .accept()
+            .await
+            .map_err(|_| QuicErrorRepr::EndpointClosed)?;
+        let remote_address = match link.src() {
+            gm_quic::qbase::net::addr::RealAddr::Internet(address) => address,
+            _ => return Err(QuicErrorRepr::ProtocolUnsupportedAddress),
+        };
+        let peer_id = connection_id(&conn);
         tracing::info!(
             "Accepted new connection from {}, sni: {:?}",
             link.src(),
@@ -228,13 +239,22 @@ impl QuicServer for EndServer {
             datagram_reader: conn.unreliable_reader()??,
             datagram_writer: conn.unreliable_writer().await??,
             inner: conn.into(),
+            remote_address,
+            peer_id,
         })
     }
 
     async fn update_config(&self, _cfg: &Self::SC) -> crate::error::SResult<()> {
-        tracing::warn!("sunnyquic gm-quic server does not support updating config");
-        Ok(())
+        Err(SError::ProtocolUnimpl)
     }
+}
+
+fn connection_id(connection: &gm_quic::prelude::Connection) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    if let Ok(connection_id) = connection.origin_dcid() {
+        connection_id.as_ref().hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 impl From<std::io::Error> for QuicErrorRepr {
@@ -242,10 +262,14 @@ impl From<std::io::Error> for QuicErrorRepr {
         QuicErrorRepr::QuicIoError(err.to_string())
     }
 }
-impl From<qbase::error::Error> for QuicErrorRepr {
-    fn from(err: qbase::error::Error) -> Self {
+impl From<gm_quic::qbase::error::Error> for QuicErrorRepr {
+    fn from(err: gm_quic::qbase::error::Error) -> Self {
         QuicErrorRepr::QuicBaseError(err.to_string())
     }
+}
+
+fn parameter_error(error: gm_quic::qbase::param::error::Error) -> SError {
+    SError::QuicError(QuicErrorRepr::QuicBaseError(error.to_string()))
 }
 impl From<gm_quic::prelude::BuildListenersError> for QuicErrorRepr {
     fn from(err: gm_quic::prelude::BuildListenersError) -> Self {

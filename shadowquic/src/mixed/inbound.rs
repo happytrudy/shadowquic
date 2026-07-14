@@ -44,13 +44,15 @@ async fn handle_connection(
     use tokio::io::AsyncReadExt;
 
     let local_addr = to_ipv4_mapped(stream.local_addr()?);
+    let peer_addr = to_ipv4_mapped(stream.peer_addr()?);
     let first_byte = stream.read_u8().await?;
 
     let req = if first_byte == 0x05 {
         let prefix = vec![first_byte];
-        SocksServer::accept_stream_with_local_addr(
+        SocksServer::accept_stream_with_addrs(
             ReplayStream::new(prefix, stream),
             local_addr,
+            Some(peer_addr),
             &users,
         )
         .await?

@@ -82,7 +82,7 @@ impl ShadowQuicClient {
                 true
             })
         });
-        // Creating new connectin
+        // Creating a new connection
         if self.quic_conn.is_none() {
             self.quic_conn = Some(self.get_conn().await?);
         }

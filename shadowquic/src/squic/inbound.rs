@@ -126,15 +126,15 @@ impl<C: QuicConnection> SQServerConn<C> {
             select! {
                 bi = conn.accept_bi() => {
                     let (send, recv, id) = bi?;
-                    let span = info_span!("bistream", id = id);
-                    trace!("bistream accepted");
-                    tokio::spawn(self.clone().handle_bistream(send, recv, req_send.clone()).instrument(span).in_current_span());
+                    let span = info_span!("bidirectional_stream", id = id);
+                    trace!("bidirectional stream accepted");
+                    tokio::spawn(self.clone().handle_bidirectional_stream(send, recv, req_send.clone()).instrument(span).in_current_span());
                 },
             }
         }
         Ok(())
     }
-    async fn handle_bistream(
+    async fn handle_bidirectional_stream(
         self: Arc<Self>,
         send: C::SendStream,
         mut recv: C::RecvStream,
@@ -164,8 +164,8 @@ impl<C: QuicConnection> SQServerConn<C> {
                     .await
                     .map_err(|_| SError::OutboundUnavailable)?;
             }
-            ref req @ (SQReq::SQAssociatOverDatagram(ref dst)
-            | SQReq::SQAssociatOverStream(ref dst)) => {
+            ref req @ (SQReq::SQAssociateOverDatagram(ref dst)
+            | SQReq::SQAssociateOverStream(ref dst)) => {
                 let user = self.current_user().await?;
                 info!(bind_addr = %dst, "udp associate request accepted");
                 let (local_send, udp_recv) = channel::<(Bytes, SocksAddr)>(10);
@@ -186,7 +186,7 @@ impl<C: QuicConnection> SQServerConn<C> {
                     send,
                     Box::new(local_recv),
                     self.inner.clone(),
-                    req == &SQReq::SQAssociatOverStream(dst.clone()),
+                    req == &SQReq::SQAssociateOverStream(dst.clone()),
                 );
                 let fut2 = handle_udp_recv_ctrl(recv, local_send, self.inner.clone());
                 tokio::try_join!(fut1, fut2)?;
@@ -255,7 +255,7 @@ impl<C: QuicConnection> SQServerConn<C> {
         user_opcode: ExtOpcodeUser,
         send: &mut C::SendStream,
     ) -> SResult<()> {
-        if !authed_user.starts_with("admin") {
+        if authed_user != "admin" {
             (Err::<(), SQExtError>(SQExtError::PermissionDenied))
                 .encode(send)
                 .await?;

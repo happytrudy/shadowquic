@@ -61,7 +61,13 @@ enum ApiCommand {
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 async fn main() {
     let cli = Cli::parse();
-    let content = std::fs::read_to_string(cli.config).expect("can't open config yaml file");
+    let content = match std::fs::read_to_string(&cli.config) {
+        Ok(content) => content,
+        Err(error) => {
+            eprintln!("failed to read config file {:?}: {error}", cli.config);
+            std::process::exit(1);
+        }
+    };
     let cfg: Config = match serde_saphyr::from_str(&content) {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -72,15 +78,21 @@ async fn main() {
     match cli.command.unwrap_or(Command::Run) {
         Command::Run => {
             setup_log(cfg.log_level.clone());
-            let manager = cfg
-                .build_manager()
-                .await
-                .expect("creating inbound/outbound failed");
+            let manager = match cfg.build_manager().await {
+                Ok(manager) => manager,
+                Err(error) => {
+                    eprintln!("failed to create inbound/outbound: {error}");
+                    std::process::exit(1);
+                }
+            };
 
             info!("shadowquic {} running", env!("CARGO_PKG_VERSION"));
             let _ =
                 std::env::current_dir().inspect(|x| info!("current working directory: {:?}", x));
-            manager.run().await.expect("shadowquic stopped");
+            if let Err(error) = manager.run().await {
+                eprintln!("shadowquic stopped: {error}");
+                std::process::exit(1);
+            }
         }
         Command::Api { command } => {
             if let Err(error) = call_api(cfg.outbound, command).await {

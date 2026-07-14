@@ -1,7 +1,6 @@
 use std::{
     io::{self},
     net::{IpAddr, SocketAddr},
-    ops::Deref,
 };
 
 use socket2::{Domain, Protocol, Socket, Type};
@@ -30,7 +29,7 @@ impl DualSocket {
         if dual_stack {
             let _ = socket.set_only_v6(false).map_err(|x| {
                 dual_stack = false;
-                tracing::warn!("set dual stack for failed: {}", x);
+                tracing::warn!("failed to enable dual stack: {}", x);
             });
         };
         socket.set_nonblocking(true)?;
@@ -60,14 +59,6 @@ impl DualSocket {
             (_, ip) => ip,
         };
         Ok((len, SocketAddr::new(ip, addr.port())))
-    }
-}
-
-impl Deref for DualSocket {
-    type Target = UdpSocket;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
     }
 }
 

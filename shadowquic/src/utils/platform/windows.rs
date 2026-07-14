@@ -14,7 +14,10 @@ pub fn bind_device(socket: &Socket, device_name: &str) -> io::Result<()> {
     let pcstr = PCSTR::from_raw(c_device_name.as_ptr() as *const u8);
     let idx = unsafe { windows::Win32::NetworkManagement::IpHelper::if_nametoindex(pcstr) };
     if idx == 0 {
-        return Err(io::Error::last_os_error());
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("network interface {device_name:?} was not found"),
+        ));
     }
 
     let handle = SOCKET(socket.as_raw_socket() as usize);

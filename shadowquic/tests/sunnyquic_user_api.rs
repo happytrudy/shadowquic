@@ -70,9 +70,10 @@ async fn sunnyquic_user_api_add_remove_list_and_permissions() {
     assert_eq!(admin.remove_user("alice").await, Err(SQExtError::NotFound),);
 
     let admin_bob = client("admin_bob", "admin-bob-pass");
-    assert_eq!(add_user(&admin_bob, "carol", "carol-pass").await, Ok(()));
-    assert_users(&admin, &["admin", "bob", "admin_bob", "carol"]).await;
-    assert_eq!(admin.remove_user("carol").await, Ok(()));
+    assert_eq!(
+        add_user(&admin_bob, "carol", "carol-pass").await,
+        Err(SQExtError::PermissionDenied)
+    );
 
     let bob = client("bob", "bob-pass");
     assert_eq!(

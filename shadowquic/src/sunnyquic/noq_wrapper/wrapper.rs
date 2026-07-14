@@ -1,6 +1,6 @@
 use std::{
     io,
-    net::{SocketAddr, ToSocketAddrs},
+    net::{SocketAddr, ToSocketAddrs, UdpSocket},
     ops::Deref,
     sync::Arc,
     time::Duration,
@@ -13,6 +13,7 @@ use bytes::Bytes;
 use noq::{
     ClientConfig, MtuDiscoveryConfig, TransportConfig, VarInt,
     congestion::{Bbr3Config, CubicConfig, NewRenoConfig},
+    crypto::rustls::{QuicClientConfig, QuicServerConfig},
 };
 use quinn_congestions::bbr::noq::BbrConfig;
 #[cfg(feature = "aws-lc-rs")]
@@ -20,15 +21,10 @@ use rustls::crypto::aws_lc_rs as crypto_provider;
 #[cfg(all(feature = "ring", not(feature = "aws-lc-rs")))]
 use rustls::crypto::ring as crypto_provider;
 use rustls::{
-    RootCertStore,
+    RootCertStore, ServerConfig as RustlsServerConfig,
     pki_types::{CertificateDer, pem::PemObject},
 };
-use std::net::UdpSocket;
 use tracing::{debug, trace, warn};
-
-use rustls::ServerConfig as RustlsServerConfig;
-
-use noq::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 
 use crate::{
     config::{
@@ -71,14 +67,6 @@ impl QuicConnection for Connection {
     type RecvStream = noq::RecvStream;
     type SendStream = noq::SendStream;
     async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream, u64), QuicErrorRepr> {
-        // let rate: f32 =
-        //     (self.stats().path.lost_packets as f32) / ((self.stats().path.sent_packets + 1) as f32);
-        // info!(
-        //     "packet_loss_rate:{:.2}%, rtt:{:?}, mtu:{}",
-        //     rate * 100.0,
-        //     self.rtt(),
-        //     self.stats().path.current_mtu,
-        // );
         let (send, recv) = self.open_bi().await?;
 
         let id = send.id().index();
@@ -87,15 +75,6 @@ impl QuicConnection for Connection {
 
     async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream, u64), QuicErrorRepr> {
         let (send, recv) = self.accept_bi().await?;
-
-        // let rate: f32 =
-        //     (self.stats().path.lost_packets as f32) / ((self.stats().path.sent_packets + 1) as f32);
-        // info!(
-        //     "packet_loss_rate:{:.2}%, rtt:{:?}, mtu:{}",
-        //     rate * 100.0,
-        //     self.rtt(),
-        //     self.stats().path.current_mtu,
-        // );
 
         let id = send.id().index();
         Ok((send, recv, id))
@@ -127,8 +106,6 @@ impl QuicConnection for Connection {
         self.close_reason().map(|x| x.into())
     }
     fn remote_address(&self) -> SocketAddr {
-        // It may fail here if this path closed
-        // TODO: fix me
         self.path(noq::PathId::ZERO)
             .and_then(|p| p.remote_address().ok())
             .unwrap_or(SocketAddr::from(([0, 0, 0, 0], 0)))
@@ -227,7 +204,7 @@ async fn add_extra_path(
         let path_addr = addrs_iter.next().ok_or_else(|| {
             QuicErrorRepr::QuicConnect(format!("no valid socket address found for {}", path))
         })?;
-        // We must wait for server hello before knowning whether multipath is enabled
+        // We must wait for server hello before knowing whether multipath is enabled
         if let Some(x) = &mut accepted_0rtt {
             let _ = x.await;
         }
@@ -302,17 +279,14 @@ pub fn gen_client_cfg(cfg: &SunnyQuicClientCfg) -> SResult<noq::ClientConfig> {
         root_store.add_parsable_certificates(der_cert);
     }
 
-    let builder = if let Some(cipher_suite_preference) = &cfg.cipher_suite_preference {
+    let mut provider = crypto_provider::default_provider();
+    if let Some(cipher_suite_preference) = &cfg.cipher_suite_preference {
         let normalized = normalize_cipher_suite_preference(cipher_suite_preference);
-        let mut provider = crypto_provider::default_provider();
         provider.cipher_suites = normalized.iter().map(to_rustls_cipher_suite).collect();
-
-        rustls::ClientConfig::builder_with_provider(Arc::new(provider))
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .map_err(|x| SError::RustlsError(x.to_string()))?
-    } else {
-        rustls::ClientConfig::builder()
-    };
+    }
+    let builder = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|x| SError::RustlsError(x.to_string()))?;
 
     let mut crypto = builder
         .with_root_certificates(root_store)
@@ -444,13 +418,14 @@ impl QuicServer for EndServer {
 fn gen_server_crypto(cfg: &SunnyQuicServerCfg) -> SResult<RustlsServerConfig> {
     let resolver = DynamicCertResolver::new(&cfg.key_path.clone(), &cfg.cert_path.clone())?;
 
-    tokio::spawn(
-        resolver
-            .clone()
-            .watch_cert_and_update(cfg.key_path.clone(), cfg.cert_path.clone()),
-    );
+    let watcher = resolver
+        .clone()
+        .watch_cert_and_update(cfg.key_path.clone(), cfg.cert_path.clone())?;
+    tokio::spawn(watcher);
     Ok(
-        RustlsServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        RustlsServerConfig::builder_with_provider(Arc::new(crypto_provider::default_provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .map_err(|x| SError::RustlsError(x.to_string()))?
             .with_no_client_auth()
             .with_cert_resolver(Arc::new(resolver.clone())),
     )
@@ -468,8 +443,6 @@ fn gen_server_config(
         .collect();
     crypto.max_early_data_size = if cfg.zero_rtt { u32::MAX } else { 0 };
     crypto.send_half_rtt_data = cfg.zero_rtt;
-
-    for _user in &cfg.users {}
 
     let mut tp_cfg = TransportConfig::default();
 

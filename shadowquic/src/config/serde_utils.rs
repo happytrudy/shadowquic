@@ -13,9 +13,9 @@ pub fn parse_bps(input: &str) -> Result<u64, String> {
     }
 
     let (num_str, multiplier) = match s.as_bytes().last().copied() {
-        Some(b'K') | Some(b'k') => (&s[..s.len() - 1], 1024f64),
-        Some(b'M') | Some(b'm') => (&s[..s.len() - 1], 1024f64 * 1024f64),
-        Some(b'G') | Some(b'g') => (&s[..s.len() - 1], 1024f64 * 1024f64 * 1024f64),
+        Some(b'K') | Some(b'k') => (&s[..s.len() - 1], 1_000f64),
+        Some(b'M') | Some(b'm') => (&s[..s.len() - 1], 1_000_000f64),
+        Some(b'G') | Some(b'g') => (&s[..s.len() - 1], 1_000_000_000f64),
         Some(b'0'..=b'9') => (s, 1f64),
         _ => return Err(format!("invalid bandwidth suffix: {input}")),
     };

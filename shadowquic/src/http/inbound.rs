@@ -355,6 +355,7 @@ fn parse_absolute_http_uri(target: &str) -> Result<ParsedHttpUri, SError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 

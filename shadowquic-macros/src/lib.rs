@@ -324,13 +324,20 @@ fn generate_enum_decode_varints(
             //eprintln!("{:#?}", ident);
             let ident_name = ident.ident.clone();
             let ident_tag = quote::format_ident!("{}_TAG", ident.ident.to_string().to_uppercase());
-            let field_type = ident.fields.iter().next().unwrap().ty.clone();
-            if ident.fields.iter().count() > 1 {
+            if !matches!(ident.fields, syn::Fields::Unnamed(_)) || ident.fields.iter().count() != 1
+            {
                 return Err(syn::Error::new_spanned(
                     ident,
-                    "Only one field is supported for non-unit variants".to_string(),
+                    "Exactly one unnamed field is required for non-unit variants".to_string(),
                 ));
             }
+            let field_type = ident
+                .fields
+                .iter()
+                .next()
+                .ok_or_else(|| syn::Error::new_spanned(ident, "Missing variant field"))?
+                .ty
+                .clone();
             let tokenstream_piece = quote! {
                 #ident_tag => {
                     let val = <#field_type as SDecode>::decode(s).await?;

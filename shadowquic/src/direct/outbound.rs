@@ -34,6 +34,8 @@ impl Outbound for DirectOut {
         let dns_strategy = self.cfg.dns_strategy.clone();
         let self_clone = self.clone();
 
+        // Outbound::handle schedules each session so the manager can continue
+        // accepting concurrent requests; per-session failures are logged here.
         let fut = async move {
             match req {
                 crate::ProxyRequest::Tcp(mut tcp_session) => {
@@ -96,10 +98,7 @@ impl DnsResolve {
     async fn inv_resolve(&self, addr: &SocketAddr) -> SocksAddr {
         if let Some(add) = self.0.lock().await.iter().find(|x| x.1 == addr) {
             SocksAddr {
-                addr: AddrOrDomain::Domain(VarVec {
-                    len: add.0.len() as u8,
-                    contents: add.0.clone(),
-                }),
+                addr: AddrOrDomain::Domain(VarVec::from(add.0.clone())),
                 port: addr.port(),
             }
         } else {
@@ -201,7 +200,7 @@ impl DirectOut {
             #[allow(unreachable_code)]
             (Ok(()) as Result<(), SError>)
         };
-        // We can use spawn, but it requirs communication to shutdown the other
+        // We can use spawn, but it requires communication to shut down the other
         // Flatten spawn handle using try_join! doesn't work. Don't know why
         tokio::try_join!(fut1, fut2)?;
         Ok(())

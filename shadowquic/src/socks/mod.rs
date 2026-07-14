@@ -1,10 +1,15 @@
-use std::{io::Cursor, net::SocketAddr, sync::Arc};
+use std::{
+    io::{self, Cursor},
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
 use tokio::{net::UdpSocket, sync::OnceCell};
 use tracing::warn;
 
+use crate::utils::dual_socket::to_ipv4_mapped;
 use crate::{
     UdpRecv, UdpSend,
     error::SError,
@@ -16,31 +21,66 @@ pub mod inbound;
 pub mod outbound;
 
 #[derive(Clone)]
-pub struct UdpSocksWrap(Arc<UdpSocket>, OnceCell<SocketAddr>); // remote addr
+pub struct UdpSocksWrap {
+    socket: Arc<UdpSocket>,
+    remote: OnceCell<SocketAddr>,
+    allowed_peer_ip: Option<IpAddr>,
+}
+
+impl UdpSocksWrap {
+    fn inbound(socket: Arc<UdpSocket>, peer_ip: Option<IpAddr>) -> Self {
+        Self {
+            socket,
+            remote: OnceCell::new(),
+            allowed_peer_ip: peer_ip.map(|ip| to_ipv4_mapped(SocketAddr::new(ip, 0)).ip()),
+        }
+    }
+
+    fn connected(socket: Arc<UdpSocket>, remote: SocketAddr) -> Self {
+        Self {
+            socket,
+            remote: OnceCell::new_with(Some(remote)),
+            allowed_peer_ip: None,
+        }
+    }
+}
+
 #[async_trait]
 impl UdpRecv for UdpSocksWrap {
     async fn recv_from(&mut self) -> Result<(Bytes, SocksAddr), SError> {
-        let mut buf = BytesMut::new();
-        buf.resize(2000, 0);
+        loop {
+            let mut buf = BytesMut::zeroed(usize::from(u16::MAX));
+            let (len, peer) = self.socket.recv_from(&mut buf).await?;
+            let peer = to_ipv4_mapped(peer);
+            if self
+                .allowed_peer_ip
+                .is_some_and(|allowed| allowed != peer.ip())
+            {
+                warn!(%peer, "dropping SOCKS UDP packet from unauthenticated peer");
+                continue;
+            }
+            buf.truncate(len);
 
-        let (len, dst) = self.0.recv_from(&mut buf).await?;
-        let mut cur = Cursor::new(buf);
-        let req = socks5::UdpReqHeader::decode(&mut cur).await?;
-        if req.frag != 0 {
-            warn!("dropping fragmented udp datagram ");
-            return Err(SError::ProtocolUnimpl);
+            let mut cur = Cursor::new(buf);
+            let req = socks5::UdpReqHeader::decode(&mut cur).await?;
+            if req.frag != 0 {
+                warn!("dropping fragmented UDP datagram");
+                continue;
+            }
+            let header_size =
+                usize::try_from(cur.position()).map_err(|_| SError::ProtocolViolation)?;
+            if header_size > len {
+                return Err(SError::ProtocolViolation);
+            }
+            self.remote
+                .get_or_try_init(|| async {
+                    self.socket.connect(peer).await?;
+                    Ok::<SocketAddr, io::Error>(peer)
+                })
+                .await?;
+            let buf = cur.into_inner().freeze();
+            return Ok((buf.slice(header_size..), req.dst));
         }
-        let headsize = usize::try_from(cur.position()).map_err(|_| SError::ProtocolViolation)?;
-        let buf = cur.into_inner();
-        self.1
-            .get_or_init(|| async {
-                let _ = self.0.connect(dst).await;
-                dst
-            })
-            .await;
-        let buf = buf.freeze();
-        // assert!(len < buf.len());
-        Ok((buf.slice(headsize..len), req.dst))
     }
 }
 #[async_trait]
@@ -59,6 +99,6 @@ impl UdpSend for UdpSocksWrap {
         buf_new.put(Bytes::from(header));
         buf_new.put(buf);
 
-        Ok(self.0.send(&buf_new).await?)
+        Ok(self.socket.send(&buf_new).await?)
     }
 }

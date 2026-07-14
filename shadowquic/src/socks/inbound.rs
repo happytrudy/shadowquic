@@ -48,6 +48,18 @@ impl SocksServer {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static + TcpTrait,
     {
+        Self::accept_stream_with_addrs(stream, local_addr, None, users).await
+    }
+
+    pub async fn accept_stream_with_addrs<S>(
+        stream: S,
+        local_addr: SocketAddr,
+        peer_addr: Option<SocketAddr>,
+        users: &[AuthUser],
+    ) -> Result<ProxyRequest, SError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static + TcpTrait,
+    {
         let users_arc = Arc::new(users.to_vec());
         let (s, req, socket) = handle_socks(users_arc, stream, local_addr).await?;
         match req.cmd {
@@ -58,9 +70,10 @@ impl SocksServer {
             })),
             SOCKS5_CMD_UDP_ASSOCIATE => {
                 let socket = Arc::new(socket.ok_or(SError::ProtocolViolation)?);
+                let peer_ip = peer_addr.map(|peer| peer.ip());
                 Ok(ProxyRequest::Udp(UdpSession {
-                    send: Arc::new(UdpSocksWrap(socket.clone(), Default::default())),
-                    recv: Box::new(UdpSocksWrap(socket, Default::default())),
+                    send: Arc::new(UdpSocksWrap::inbound(socket.clone(), peer_ip)),
+                    recv: Box::new(UdpSocksWrap::inbound(socket, peer_ip)),
                     bind_addr: req.dst,
                     stream: Some(Box::new(s)),
                     user_context: None,
@@ -172,6 +185,7 @@ async fn handle_tcp(
     sender: Sender<ProxyRequest>,
 ) -> SResult<()> {
     let local_addr = to_ipv4_mapped(stream.local_addr()?);
+    let peer_ip = Some(to_ipv4_mapped(stream.peer_addr()?).ip());
 
     let (s, req, socket) = handle_socks(users, stream, local_addr)
         .in_current_span()
@@ -189,9 +203,9 @@ async fn handle_tcp(
             info!(bind_dst = %req.dst, "udp associate request accepted");
             let socket = Arc::new(socket.ok_or(SError::ProtocolViolation)?);
             ProxyRequest::Udp(UdpSession {
-                send: Arc::new(UdpSocksWrap(socket.clone(), Default::default()))
+                send: Arc::new(UdpSocksWrap::inbound(socket.clone(), peer_ip))
                     as Arc<dyn crate::UdpSend>,
-                recv: Box::new(UdpSocksWrap(socket, Default::default())) as Box<dyn crate::UdpRecv>,
+                recv: Box::new(UdpSocksWrap::inbound(socket, peer_ip)) as Box<dyn crate::UdpRecv>,
                 bind_addr: req.dst,
                 stream: Some(Box::new(s) as Box<dyn crate::TcpTrait>),
                 user_context: None,

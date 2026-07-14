@@ -18,3 +18,9 @@ readme = "README.md"
 
 
 [workspace.dependencies]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+strip = true

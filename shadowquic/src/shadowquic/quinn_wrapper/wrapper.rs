@@ -238,18 +238,14 @@ pub fn gen_client_cfg(cfg: &ShadowQuicClientCfg) -> SResult<quinn::ClientConfig>
         roots: webpki_roots::TLS_SERVER_ROOTS.into(),
     };
 
-    let builder = if let Some(cipher_suite_preference) = &cfg.cipher_suite_preference {
+    let mut provider = crypto_provider::default_provider();
+    if let Some(cipher_suite_preference) = &cfg.cipher_suite_preference {
         let normalized = normalize_cipher_suite_preference(cipher_suite_preference);
-
-        let mut provider = crypto_provider::default_provider();
         provider.cipher_suites = normalized.iter().map(to_quinn_cipher_suite).collect();
-
-        quinn::rustls::ClientConfig::builder_with_provider(Arc::new(provider))
-            .with_protocol_versions(&[&quinn::rustls::version::TLS13])
-            .map_err(|x| SError::RustlsError(x.to_string()))?
-    } else {
-        quinn::rustls::ClientConfig::builder()
-    };
+    }
+    let builder = quinn::rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(&[&quinn::rustls::version::TLS13])
+        .map_err(|x| SError::RustlsError(x.to_string()))?;
 
     let mut crypto = builder
         .with_root_certificates(root_store)
@@ -349,11 +345,14 @@ impl QuicServer for EndServer {
             .map_err(|x| SError::RustlsError(x.to_string()))?;
         let cert_der = CertificateDer::from(cert.cert);
         let priv_key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
-        crypto =
-            RustlsServerConfig::builder_with_protocol_versions(&[&quinn::rustls::version::TLS13])
-                .with_no_client_auth()
-                .with_single_cert(vec![cert_der], PrivateKeyDer::Pkcs8(priv_key))
-                .map_err(|x| SError::RustlsError(x.to_string()))?;
+        crypto = RustlsServerConfig::builder_with_provider(Arc::new(
+            crypto_provider::default_provider(),
+        ))
+        .with_protocol_versions(&[&quinn::rustls::version::TLS13])
+        .map_err(|x| SError::RustlsError(x.to_string()))?
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der], PrivateKeyDer::Pkcs8(priv_key))
+        .map_err(|x| SError::RustlsError(x.to_string()))?;
 
         let config = gen_server_config(cfg, &mut crypto)?;
         let socket = bind_server_udp_socket(cfg.bind_addr)?;

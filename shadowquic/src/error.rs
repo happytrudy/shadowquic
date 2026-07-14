@@ -23,7 +23,7 @@ pub enum SError {
     DomainResolveFailed(String),
     #[error("mpsc channel error: {0}")]
     ChannelError(String),
-    #[error("UDP session closed closed due to: {0}")]
+    #[error("UDP session closed due to: {0}")]
     UDPSessionClosed(String),
     #[error("socks error: {0}")]
     SocksError(String),
@@ -32,16 +32,6 @@ pub enum SError {
 }
 
 pub type SResult<T> = result::Result<T, SError>;
-
-// #[derive(Error, Debug)]
-// #[error(transparent)]
-// pub struct QuicError(#[from] QuicErrorRepr);
-
-// impl From<rustls_jls::Error> for SError {
-//     fn from(err: rustls_jls::Error) -> Self {
-//         SError::RustlsError(err.to_string())
-//     }
-// }
 
 impl From<quinn::rustls::Error> for SError {
     fn from(err: quinn::rustls::Error) -> Self {

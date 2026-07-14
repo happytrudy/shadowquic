@@ -39,7 +39,7 @@ pub mod outbound;
 
 /// SQuic connection, it is shared by shadowquic and sunnyquic and is a wrapper of quic connection.
 /// It contains a connection object and two ID store for managing UDP sockets.
-/// The IDStore stores the mapping between ids and the destionation addresses as well as associated sockets
+/// The IDStore stores the mapping between IDs and destination addresses as well as associated sockets.
 #[derive(Clone)]
 pub struct SQConn<T: QuicConnection> {
     pub(crate) conn: T,
@@ -403,7 +403,7 @@ impl Drop for AssociateRecvSession {
 
 /// Handle udp packets send
 /// It watches the udp socket and sends the packets to the quic connection.
-/// This function is symetrical for both clients and servers.
+/// This function is symmetrical for both clients and servers.
 pub async fn handle_udp_send<C: QuicConnection>(
     mut send: C::SendStream,
     udp_recv: AnyUdpRecv,
@@ -453,7 +453,10 @@ pub async fn handle_udp_send<C: QuicConnection>(
                 if is_new {
                     dg_header.encode(&mut head).await?
                 }
-                (bytes.len() as u16).encode(&mut head).await?;
+                u16::try_from(bytes.len())
+                    .map_err(|_| SError::ProtocolViolation)?
+                    .encode(&mut head)
+                    .await?;
                 conn.write_all(&head).await?;
                 conn.write_all(&bytes).await?;
             } else {
@@ -471,8 +474,8 @@ pub async fn handle_udp_send<C: QuicConnection>(
 }
 
 /// Handle udp ctrl stream receive task
-/// it retrieves the dst id pair from the bistream and records related socket and address
-/// This function is symetrical for both clients and servers.
+/// It retrieves the destination/ID pair from the bidirectional stream and records the socket.
+/// This function is symmetrical for both clients and servers.
 pub async fn handle_udp_recv_ctrl<C: QuicConnection>(
     mut recv: C::RecvStream,
     udp_socket: AnyUdpSend,
@@ -494,7 +497,7 @@ pub async fn handle_udp_recv_ctrl<C: QuicConnection>(
 /// Handle udp packet receive task
 /// It watches udp packets from quic connection and sends them to the udp socket.
 /// The udp socket could be downstream(inbound) or upstream(outbound)
-/// This function is symetrical for both clients and servers.
+/// This function is symmetrical for both clients and servers.
 pub async fn handle_udp_packet_recv<C: QuicConnection>(conn: SQConn<C>) -> Result<(), SError> {
     let id_store = conn.recv_id_store.clone();
     wait_sunny_auth(&conn).await?;

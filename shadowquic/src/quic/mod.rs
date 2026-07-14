@@ -13,11 +13,6 @@ pub const MAX_STREAM_WINDOW: u64 = MAX_WINDOW_BASE;
 pub const MAX_SEND_WINDOW: u64 = MAX_WINDOW_BASE * 8;
 pub const MAX_DATAGRAM_WINDOW: u64 = MAX_WINDOW_BASE * 2;
 
-// #[cfg(feature = "gm-quic")]
-// mod gm_quic_wrapper;
-// #[cfg(feature = "gm-quic")]
-// pub use gm_quic_wrapper::{Connection, EndClient, EndServer, QuicErrorRepr};
-
 #[async_trait]
 pub trait QuicClient: Send + Sync {
     type C: QuicConnection;
@@ -105,4 +100,6 @@ pub enum QuicErrorRepr {
     QuicSendDatagramError(String),
     #[error("JLS Authentication failed")]
     JlsAuthFailed,
+    #[error("QUIC backend returned an unsupported peer address")]
+    ProtocolUnsupportedAddress,
 }

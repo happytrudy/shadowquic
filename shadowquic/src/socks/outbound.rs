@@ -1,9 +1,9 @@
-use std::{net::ToSocketAddrs, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 
 use crate::{
     TcpSession, UdpRecv, UdpSend, UdpSession,
     msgs::socks5::{
-        CmdReply, PasswordAuthReply, PasswordAuthReq, SOCKS5_AUTH_METHOD_PASSWORD,
+        AddrOrDomain, CmdReply, PasswordAuthReply, PasswordAuthReq, SOCKS5_AUTH_METHOD_PASSWORD,
         SOCKS5_CMD_TCP_CONNECT, SOCKS5_CMD_UDP_ASSOCIATE, SOCKS5_REPLY_SUCCEEDED, SOCKS5_RESERVE,
         SOCKS5_VERSION,
     },
@@ -13,7 +13,6 @@ use crate::{
 use tokio::{
     io::{AsyncReadExt, copy_bidirectional_with_sizes},
     net::{TcpStream, UdpSocket},
-    sync::OnceCell,
 };
 
 use async_trait::async_trait;
@@ -136,12 +135,7 @@ impl SocksClient {
         let socket = self.tcp_socket_factory.create_socket().await?;
         let std_stream: std::net::TcpStream = socket.into();
         let tokio_socket = tokio::net::TcpSocket::from_std_stream(std_stream);
-        let addr = self.cfg.addr.to_socket_addrs()?.next().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "socks server address not found",
-            )
-        })?;
+        let addr = resolve_address(&self.cfg.addr).await?;
         let tcp = tokio_socket.connect(addr).await?;
         tcp.set_nodelay(true)?;
         let mut tcp = self.authenticate(tcp).await?;
@@ -152,7 +146,8 @@ impl SocksClient {
             dst: tcp_session.dst,
         };
         socksreq.encode(&mut tcp).await?;
-        let _rep = CmdReply::decode(&mut tcp).await?;
+        let rep = CmdReply::decode(&mut tcp).await?;
+        validate_command_reply(&rep)?;
         tracing::trace!("socks tcp connection established");
         copy_bidirectional_with_sizes(&mut tcp, &mut tcp_session.stream, 16 * 1024, 16 * 1024)
             .await?;
@@ -164,12 +159,7 @@ impl SocksClient {
         let socket = self.tcp_socket_factory.create_socket().await?;
         let std_stream: std::net::TcpStream = socket.into();
         let tokio_socket = tokio::net::TcpSocket::from_std_stream(std_stream);
-        let addr = self.cfg.addr.to_socket_addrs()?.next().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "socks server address not found",
-            )
-        })?;
+        let addr = resolve_address(&self.cfg.addr).await?;
         let tcp = tokio_socket.connect(addr).await?;
         tcp.set_nodelay(true)?;
 
@@ -183,13 +173,12 @@ impl SocksClient {
         };
         socksreq.encode(&mut tcp).await?;
         let rep = CmdReply::decode(&mut tcp).await?;
+        validate_command_reply(&rep)?;
         tracing::trace!("socks udp association established");
-        let peer_addr = rep
-            .bind_addr
-            .to_socket_addrs()
-            .map_err(|error| SError::SocksError(error.to_string()))?
-            .next()
-            .ok_or_else(|| SError::SocksError("SOCKS server returned no address".into()))?;
+        let mut peer_addr = resolve_socks_address(&rep.bind_addr).await?;
+        if peer_addr.ip().is_unspecified() {
+            peer_addr.set_ip(addr.ip());
+        }
 
         let udp_socket_factory = UdpSocketFactory {
             addr: peer_addr.to_string(),
@@ -203,7 +192,7 @@ impl SocksClient {
         let std_socket: std::net::UdpSocket = socket.into();
         let socket = UdpSocket::from_std(std_socket)?;
         socket.connect(peer_addr).await?;
-        let mut upstream = UdpSocksWrap(Arc::new(socket), OnceCell::new_with(Some(peer_addr)));
+        let mut upstream = UdpSocksWrap::connected(Arc::new(socket), peer_addr);
 
         let upstream_clone = upstream.clone();
         let fut1 = async move {
@@ -240,10 +229,41 @@ impl SocksClient {
                 "unexpected data received from socks control stream".into(),
             )) as Result<(), SError>
         };
-        // We can use spawn, but it requirs communication to shutdown the other
+        // We can use spawn, but it requires communication to shut down the other
         // Flatten spawn handle using try_join! doesn't work. Don't know why
         tokio::try_join!(fut1, fut2, fut3)?;
 
         Ok(())
     }
+}
+
+async fn resolve_address(address: &str) -> Result<SocketAddr, SError> {
+    tokio::net::lookup_host(address)
+        .await?
+        .next()
+        .ok_or_else(|| SError::DomainResolveFailed(address.to_owned()))
+}
+
+async fn resolve_socks_address(
+    address: &crate::msgs::socks5::SocksAddr,
+) -> Result<SocketAddr, SError> {
+    match &address.addr {
+        AddrOrDomain::V4(ip) => Ok(SocketAddr::from((*ip, address.port))),
+        AddrOrDomain::V6(ip) => Ok(SocketAddr::from((*ip, address.port))),
+        AddrOrDomain::Domain(domain) => {
+            let domain = std::str::from_utf8(&domain.contents)
+                .map_err(|error| SError::SocksError(error.to_string()))?;
+            resolve_address(&format!("{domain}:{}", address.port)).await
+        }
+    }
+}
+
+fn validate_command_reply(reply: &CmdReply) -> Result<(), SError> {
+    if reply.version != SOCKS5_VERSION || reply.rep != SOCKS5_REPLY_SUCCEEDED {
+        return Err(SError::SocksError(format!(
+            "SOCKS command failed with reply code {}",
+            reply.rep
+        )));
+    }
+    Ok(())
 }

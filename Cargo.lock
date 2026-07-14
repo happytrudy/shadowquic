@@ -330,15 +330,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "block2"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdeb9d870516001442e364c5220d3574d2da8dc765554b4a617230d33fa58ef5"
-dependencies = [
- "objc2",
-]
-
-[[package]]
 name = "brutal-core"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -807,18 +798,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dispatch2"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
-dependencies = [
- "bitflags",
- "block2",
- "libc",
- "objc2",
-]
-
-[[package]]
 name = "displaydoc"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -834,17 +813,6 @@ name = "dlopen2"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09b4f5f101177ff01b8ec4ecc81eead416a8aa42819a2869311b3420fa114ffa"
-dependencies = [
- "libc",
- "once_cell",
- "winapi",
-]
-
-[[package]]
-name = "dlopen2"
-version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e2c5bd4158e66d1e215c49b837e11d62f3267b30c92f1d171c4d3105e3dc4d4"
 dependencies = [
  "libc",
  "once_cell",
@@ -1782,38 +1750,16 @@ version = "0.39.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35a703aa1a87cd885b9f674922445a42dbb0c0f4f1b28fef21b227ae32375d21"
 dependencies = [
- "dlopen2 0.5.0",
+ "dlopen2",
  "ipnet",
  "libc",
  "mac-addr",
  "netlink-packet-core",
- "netlink-packet-route 0.25.1",
+ "netlink-packet-route",
  "netlink-sys",
  "once_cell",
  "system-configuration",
  "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "netdev"
-version = "0.42.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e30af1a5073b82356d9317c18226826370b4288eba2f71c7e84e18bae51b3847"
-dependencies = [
- "block2",
- "dispatch2",
- "dlopen2 0.8.2",
- "ipnet",
- "libc",
- "mac-addr",
- "netlink-packet-core",
- "netlink-packet-route 0.29.0",
- "netlink-sys",
- "objc2-core-foundation",
- "objc2-system-configuration",
- "once_cell",
- "plist",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1830,18 +1776,6 @@ name = "netlink-packet-route"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ec2f5b6839be2a19d7fa5aab5bc444380f6311c2b693551cb80f45caaa7b5ef"
-dependencies = [
- "bitflags",
- "libc",
- "log",
- "netlink-packet-core",
-]
-
-[[package]]
-name = "netlink-packet-route"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df9854ea6ad14e3f4698a7f03b65bce0833dd2d81d594a0e4a984170537146b6"
 dependencies = [
  "bitflags",
  "libc",
@@ -2068,59 +2002,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "objc2"
-version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a12a8ed07aefc768292f076dc3ac8c48f3781c8f2d5851dd3d98950e8c5a89f"
-dependencies = [
- "objc2-encode",
-]
-
-[[package]]
-name = "objc2-core-foundation"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a180dd8642fa45cdb7dd721cd4c11b1cadd4929ce112ebd8b9f5803cc79d536"
-dependencies = [
- "bitflags",
- "block2",
- "dispatch2",
- "libc",
- "objc2",
-]
-
-[[package]]
-name = "objc2-encode"
-version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef25abbcd74fb2609453eb695bd2f860d389e457f67dc17cafc8b8cbc89d0c33"
-
-[[package]]
-name = "objc2-security"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "709fe137109bd1e8b5a99390f77a7d8b2961dafc1a1c5db8f2e60329ad6d895a"
-dependencies = [
- "bitflags",
- "objc2",
- "objc2-core-foundation",
-]
-
-[[package]]
-name = "objc2-system-configuration"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7216bd11cbda54ccabcab84d523dc93b858ec75ecfb3a7d89513fa22464da396"
-dependencies = [
- "bitflags",
- "dispatch2",
- "libc",
- "objc2",
- "objc2-core-foundation",
- "objc2-security",
-]
-
-[[package]]
 name = "oid-registry"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2221,19 +2102,6 @@ name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
-
-[[package]]
-name = "plist"
-version = "1.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "092791278e026273c1b65bbdcfbba3a300f2994c896bd01ab01da613c29c46f1"
-dependencies = [
- "base64 0.22.1",
- "indexmap 2.14.0",
- "quick-xml",
- "serde",
- "time",
-]
 
 [[package]]
 name = "polyval"
@@ -2354,37 +2222,12 @@ dependencies = [
  "futures",
  "getset",
  "http",
- "netdev 0.39.0",
+ "netdev",
  "nom 8.0.0",
- "qmacro 0.4.0",
+ "qmacro",
  "rand 0.9.4",
  "rustls 0.23.40",
  "serde",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "qbase"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3cdbef5642d30149a0221eb7b2f1b64792122a902749cd5b323680d0eba40e24"
-dependencies = [
- "bitflags",
- "bytes",
- "derive_more",
- "enum_dispatch",
- "futures",
- "getset",
- "http",
- "netdev 0.42.0",
- "nom 8.0.0",
- "qmacro 0.5.0",
- "rand 0.10.1",
- "rustls 0.23.40",
- "serde",
- "smallvec",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2396,8 +2239,8 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f1d18c9321ffba0ba83316fc4d3ec687a8a6c3d4d3532ed7105c98cba5556b6"
 dependencies = [
- "qbase 0.4.0",
- "qevent 0.4.0",
+ "qbase",
+ "qevent",
  "rand 0.9.4",
  "thiserror 2.0.18",
  "tokio",
@@ -2415,9 +2258,9 @@ dependencies = [
  "derive_more",
  "enum_dispatch",
  "futures",
- "qbase 0.4.0",
+ "qbase",
  "qcongestion",
- "qevent 0.4.0",
+ "qevent",
  "qinterface",
  "qrecovery",
  "qunreliable",
@@ -2441,26 +2284,7 @@ dependencies = [
  "derive_more",
  "enum_dispatch",
  "pin-project-lite",
- "qbase 0.4.0",
- "serde",
- "serde_json",
- "serde_with",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "qevent"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0cc9b4e676b1938011505ccd78fb75a085280112ac868cb8dc10209eace5ff1d"
-dependencies = [
- "bytes",
- "derive_builder",
- "derive_more",
- "enum_dispatch",
- "pin-project-lite",
- "qbase 0.5.0",
+ "qbase",
  "serde",
  "serde_json",
  "serde_with",
@@ -2478,10 +2302,10 @@ dependencies = [
  "dashmap",
  "derive_more",
  "futures",
- "netdev 0.39.0",
+ "netdev",
  "netwatcher",
- "qbase 0.4.0",
- "qevent 0.4.0",
+ "qbase",
+ "qevent",
  "qudp",
  "rustls 0.23.40",
  "serde",
@@ -2504,18 +2328,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "qmacro"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46d4ab839a48c5e0eca33bb568b295be3505535f645baf00bd45452ba2ea2872"
-dependencies = [
- "darling 0.23.0",
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "qrecovery"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2525,8 +2337,8 @@ dependencies = [
  "derive_more",
  "enum_dispatch",
  "futures",
- "qbase 0.4.0",
- "qevent 0.4.0",
+ "qbase",
+ "qevent",
  "rand 0.9.4",
  "rustls 0.23.40",
  "thiserror 2.0.18",
@@ -2548,15 +2360,6 @@ dependencies = [
  "tokio",
  "tracing",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "quick-xml"
-version = "0.39.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdcc8dd4e2f670d309a5f0e83fe36dfdc05af317008fea29144da1a2ac858e5e"
-dependencies = [
- "memchr",
 ]
 
 [[package]]
@@ -2739,7 +2542,7 @@ checksum = "1d696ab6023d0f13ca2ad6377c779b87881dbdbacad63a8d50c2a98f96e3a004"
 dependencies = [
  "bytes",
  "futures",
- "qbase 0.4.0",
+ "qbase",
  "tokio",
  "tracing",
 ]
@@ -3255,12 +3058,9 @@ dependencies = [
  "noq",
  "noq-proto",
  "notify",
- "qbase 0.5.0",
- "qevent 0.5.0",
  "quinn-congestions",
  "quinn-jls",
  "quinn-proto-jls",
- "qunreliable",
  "rand 0.10.1",
  "rcgen",
  "ring",

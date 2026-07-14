@@ -1,3 +1,6 @@
+#[cfg(not(any(feature = "ring", feature = "aws-lc-rs")))]
+compile_error!("shadowquic requires either the `ring` or `aws-lc-rs` crypto feature");
+
 use std::{
     net::SocketAddr,
     sync::{Arc, Weak},
@@ -153,11 +156,11 @@ pub trait Outbound<T = AnyTcp, I = AnyUdpRecv, O = AnyUdpSend>: Send + Sync + Un
 #[async_trait]
 impl UdpSend for Sender<(Bytes, SocksAddr)> {
     async fn send_to(&self, buf: Bytes, addr: SocksAddr) -> Result<usize, SError> {
-        let siz = buf.len();
+        let size = buf.len();
         self.send((buf, addr))
             .await
             .map_err(|_| SError::InboundUnavailable)?;
-        Ok(siz)
+        Ok(size)
     }
 }
 #[async_trait]

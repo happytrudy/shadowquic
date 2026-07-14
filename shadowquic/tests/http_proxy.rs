@@ -181,7 +181,7 @@ async fn spawn_mixed_proxy_chain(entry_port: u16, upstream_port: u16) {
     .unwrap();
 
     let socks_client = SocksClient::new(SocksClientCfg {
-        addr: format!("[::1]:{}", upstream_port).into(),
+        addr: format!("[::1]:{}", upstream_port),
         username: Some("test".into()),
         password: Some("test".into()),
         socket_opt: SocketOpt::default(),
@@ -338,8 +338,6 @@ async fn test_http_auth_required() {
 
     let target_addr = spawn_http_target().await;
     let entry_port = 11083;
-    let upstream_port = 11097;
-
     let mixed_server = MixedServer::new(MixedServerCfg {
         bind_addr: format!("127.0.0.1:{}", entry_port).parse().unwrap(),
         users: vec![AuthUser {
