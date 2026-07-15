@@ -26,6 +26,9 @@ use crate::{
 
 use super::{SQConn, handle_udp_packet_recv, handle_udp_recv_ctrl, handle_udp_send};
 
+#[path = "../white/mod.rs"]
+mod white;
+
 pub type SunnyQuicUsers = Arc<HashMap<SunnyCredential, String>>;
 
 #[async_trait::async_trait]
@@ -50,6 +53,10 @@ impl<C: QuicConnection> SQServerConn<C> {
         req_send: Sender<ProxyRequest>,
     ) -> Result<(), SError> {
         let conn = &self.inner;
+        let connection: Arc<dyn Stoppable> = self.clone();
+        if !white::authorize(conn.remote_address().ip(), Arc::downgrade(&connection)) {
+            return Ok(());
+        }
         info!(peer_address = %conn.remote_address(), "incoming connection accepted");
         let conn_clone = self.inner.clone();
         tokio::spawn(async move {
