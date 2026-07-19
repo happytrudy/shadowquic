@@ -60,12 +60,17 @@ Configuration detail can be found in [Documentation](https://spongebob888.github
 - nekobox: [usage](./document/clients/windows.md)
 - v2rayN: [usage](./document/clients/windows.md)
 - [QuicProxy](https://github.com/RealBikiniBottom/QuicProxy): GUI and core
+- mihomo
 
 ## Other Servers
 - [docker](https://github.com/spongebob888/shadowquic/pkgs/container/shadowquic): example [compose file](./shadowquic/config_examples/compose.yaml)
 - [QuicProxy](https://github.com/RealBikiniBottom/QuicProxy): GUI and core
+- mihomo
 ## Protocol
 [PROTOCOL](./PROTOCOL.pdf)
+
+## Interop
+[ShadowQUIC Interop](https://spongebob888.github.io/shadowquic_interop)
 
 ## Acknowledgement
  * [JLS](https://github.com/JimmyHuang454/JLS)
